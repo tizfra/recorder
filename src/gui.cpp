@@ -165,22 +165,14 @@ int run_gui(const Config& config) {
           std::fprintf(stderr, "Device removed: %s\n", selected_device_name.c_str());
           rec.reset();
 
-          // Pick the best remaining device
-          DeviceInfo* best = nullptr;
-          for (auto& d : devices) {
-            if (!best || (is_usb_device(d.name) && !is_usb_device(best->name)) ||
-                (is_usb_device(d.name) == is_usb_device(best->name) &&
-                 d.max_input_channels > best->max_input_channels)) {
-              best = &d;
-            }
-          }
-          if (best) {
-            active_config.device_index = best->index;
-            active_config.channels = best->max_input_channels;
-            selected_device_name = best->name;
-            selected_channels = best->max_input_channels;
-            std::fprintf(stderr, "Switched to: %s (%dch)\n", best->name.c_str(),
-                         best->max_input_channels);
+          auto fallback = find_preferred_device();
+          if (fallback) {
+            active_config.device_index = fallback->index;
+            active_config.channels = fallback->max_input_channels;
+            selected_device_name = fallback->name;
+            selected_channels = fallback->max_input_channels;
+            std::fprintf(stderr, "Switched to: %s (%dch)\n", fallback->name.c_str(),
+                         fallback->max_input_channels);
           } else {
             selected_device_name.clear();
             selected_channels = 0;

@@ -16,7 +16,8 @@ static bool is_builtin_or_virtual(const char* name) {
       "MacBook",    "Built-in",  "Internal",
       "Microsoft Teams", "ZoomAudioDevice",
       "BlackHole",  "Soundflower", "Loopback",
-      "default",    "pulse",
+      "default",    "pulse",      "sysdefault",
+      "dmix",       "surround",   "front:",
   };
   for (auto* pattern : skip_patterns) {
     if (std::strstr(name, pattern)) return true;
@@ -28,8 +29,28 @@ static bool looks_like_usb(const char* name) {
   return std::strstr(name, "USB") || std::strstr(name, "usb");
 }
 
+static bool is_hw_device(const char* name) {
+  // ALSA direct hardware devices contain "hw:" in their name
+  return std::strstr(name, "(hw:") || std::strstr(name, "hw:") == name;
+}
+
 bool is_usb_device(const std::string& name) {
   return looks_like_usb(name.c_str()) || !is_builtin_or_virtual(name.c_str());
+}
+
+// Higher score = more preferred
+static int device_score(const char* name, int channels) {
+  bool usb = looks_like_usb(name);
+  bool hw = is_hw_device(name);
+  bool builtin = is_builtin_or_virtual(name);
+
+  int score = channels;
+
+  if (usb)      score += 10000;
+  if (hw)       score += 5000;
+  if (!builtin) score += 1000;
+
+  return score;
 }
 
 std::vector<DeviceInfo> scan_input_devices() {
@@ -54,47 +75,28 @@ std::optional<DeviceInfo> find_preferred_device() {
     return std::nullopt;
   }
 
-  // Collect all input devices
-  struct Candidate {
-    int index;
-    int channels;
-    std::string name;
-    bool is_usb_like;
-  };
-  std::vector<Candidate> candidates;
+  int best_index = -1;
+  int best_score = -1;
+  int best_channels = 0;
+  std::string best_name;
 
   for (int i = 0; i < count; ++i) {
     const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
     if (!info || info->maxInputChannels <= 0) continue;
 
-    bool builtin = is_builtin_or_virtual(info->name);
-    bool usb = looks_like_usb(info->name);
-
-    // On macOS, a device that isn't built-in/virtual is likely USB/Thunderbolt
-    bool usb_like = usb || !builtin;
-
-    candidates.push_back({i, info->maxInputChannels, info->name, usb_like});
+    int score = device_score(info->name, info->maxInputChannels);
+    if (score > best_score) {
+      best_score = score;
+      best_index = i;
+      best_channels = info->maxInputChannels;
+      best_name = info->name;
+    }
   }
 
   Pa_Terminate();
 
-  if (candidates.empty()) return std::nullopt;
-
-  // Prefer USB-like devices; among those, prefer the one with most channels
-  Candidate* best = nullptr;
-  for (auto& c : candidates) {
-    if (!best) {
-      best = &c;
-      continue;
-    }
-    if (c.is_usb_like && !best->is_usb_like) {
-      best = &c;
-    } else if (c.is_usb_like == best->is_usb_like && c.channels > best->channels) {
-      best = &c;
-    }
-  }
-
-  return DeviceInfo{best->index, best->channels, best->name};
+  if (best_index < 0) return std::nullopt;
+  return DeviceInfo{best_index, best_channels, best_name};
 }
 
 std::optional<DeviceInfo> get_device_info(int index) {
