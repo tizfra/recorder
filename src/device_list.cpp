@@ -169,4 +169,24 @@ std::string find_usb_disk() {
   return {};
 }
 
+std::string unique_filename(const std::string& path) {
+  namespace fs = std::filesystem;
+  if (!fs::exists(path)) return path;
+
+  std::string stem, ext;
+  auto dot = path.rfind('.');
+  if (dot != std::string::npos) {
+    stem = path.substr(0, dot);
+    ext = path.substr(dot);
+  } else {
+    stem = path;
+  }
+
+  for (int i = 2; i < 10000; ++i) {
+    std::string candidate = stem + "_" + std::to_string(i) + ext;
+    if (!fs::exists(candidate)) return candidate;
+  }
+  return path;
+}
+
 }  // namespace recorder

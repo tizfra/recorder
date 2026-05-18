@@ -193,11 +193,13 @@ int run_gui(const Config& config) {
         if (usb_disk != current_usb_disk) {
           current_usb_disk = usb_disk;
           if (!usb_disk.empty()) {
-            active_config.output_file = usb_disk + "/" + output_basename;
-            std::fprintf(stderr, "USB disk detected: %s\n", usb_disk.c_str());
+            active_config.output_file = unique_filename(usb_disk + "/" + output_basename);
+            std::fprintf(stderr, "USB disk detected: %s → %s\n", usb_disk.c_str(),
+                         active_config.output_file.c_str());
           } else {
-            active_config.output_file = output_basename;
-            std::fprintf(stderr, "USB disk removed, output: ./%s\n", output_basename.c_str());
+            active_config.output_file = unique_filename(output_basename);
+            std::fprintf(stderr, "USB disk removed, output: %s\n",
+                         active_config.output_file.c_str());
           }
         }
       }

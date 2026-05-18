@@ -3,33 +3,11 @@
 #include <getopt.h>
 
 #include <cstdlib>
-#include <filesystem>
 #include <iostream>
 
 #include "device_list.h"
 
 namespace recorder {
-
-namespace fs = std::filesystem;
-
-static std::string unique_filename(const std::string& path) {
-  if (!fs::exists(path)) return path;
-
-  std::string stem, ext;
-  auto dot = path.rfind('.');
-  if (dot != std::string::npos) {
-    stem = path.substr(0, dot);
-    ext = path.substr(dot);
-  } else {
-    stem = path;
-  }
-
-  for (int i = 2; i < 10000; ++i) {
-    std::string candidate = stem + "_" + std::to_string(i) + ext;
-    if (!fs::exists(candidate)) return candidate;
-  }
-  return path;
-}
 
 static std::string default_output_path() {
   std::string usb = find_usb_disk();
