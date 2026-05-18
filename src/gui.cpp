@@ -147,11 +147,40 @@ int run_gui(const Config& config) {
           }
         }
 
-        // Update known set (remove disappeared devices)
+        // Update known set and detect removal of selected device
         std::set<std::string> current_names;
         for (auto& d : devices) {
           current_names.insert(d.name);
         }
+
+        if (!selected_device_name.empty() &&
+            current_names.find(selected_device_name) == current_names.end()) {
+          std::fprintf(stderr, "Device removed: %s\n", selected_device_name.c_str());
+          rec.reset();
+
+          // Pick the best remaining device
+          DeviceInfo* best = nullptr;
+          for (auto& d : devices) {
+            if (!best || (is_usb_device(d.name) && !is_usb_device(best->name)) ||
+                (is_usb_device(d.name) == is_usb_device(best->name) &&
+                 d.max_input_channels > best->max_input_channels)) {
+              best = &d;
+            }
+          }
+          if (best) {
+            active_config.device_index = best->index;
+            active_config.channels = best->max_input_channels;
+            selected_device_name = best->name;
+            selected_channels = best->max_input_channels;
+            std::fprintf(stderr, "Switched to: %s (%dch)\n", best->name.c_str(),
+                         best->max_input_channels);
+          } else {
+            selected_device_name.clear();
+            selected_channels = 0;
+            active_config.device_index = -1;
+          }
+        }
+
         known_devices = current_names;
       }
     }
