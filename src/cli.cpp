@@ -1,11 +1,64 @@
 #include "cli.h"
 
 #include <getopt.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <string>
 
 namespace recorder {
+
+namespace fs = std::filesystem;
+
+static std::string find_usb_disk() {
+#ifdef __APPLE__
+  // macOS: external disks mount under /Volumes/. Skip the boot volume.
+  const fs::path volumes("/Volumes");
+  if (!fs::is_directory(volumes)) return {};
+  for (auto& entry : fs::directory_iterator(volumes)) {
+    if (!entry.is_directory()) continue;
+    auto name = entry.path().filename().string();
+    if (name == "Macintosh HD") continue;
+    // Check it's writable
+    if (access(entry.path().c_str(), W_OK) == 0) {
+      return entry.path().string();
+    }
+  }
+#else
+  // Linux: external disks mount under /media/$USER/ or /mnt/
+  if (const char* user = std::getenv("USER")) {
+    fs::path media = fs::path("/media") / user;
+    if (fs::is_directory(media)) {
+      for (auto& entry : fs::directory_iterator(media)) {
+        if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
+          return entry.path().string();
+        }
+      }
+    }
+  }
+  // Fallback: check /mnt/ for mounted volumes
+  const fs::path mnt("/mnt");
+  if (fs::is_directory(mnt)) {
+    for (auto& entry : fs::directory_iterator(mnt)) {
+      if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
+        return entry.path().string();
+      }
+    }
+  }
+#endif
+  return {};
+}
+
+static std::string default_output_path() {
+  std::string usb = find_usb_disk();
+  if (!usb.empty()) {
+    return usb + "/recording.flac";
+  }
+  return "recording.flac";
+}
 
 static void print_usage(const char* prog) {
   std::cerr
@@ -17,7 +70,7 @@ static void print_usage(const char* prog) {
       << "  -c, --channels <n>         Number of channels, 1-32 (default: 2)\n"
       << "  -r, --rate <hz>            Sample rate in Hz (default: 48000)\n"
       << "  -b, --bits <n>             Bit depth: 16 or 24 (default: 24)\n"
-      << "  -o, --output <file>        Output FLAC filename (default: recording.flac)\n"
+      << "  -o, --output <file>        Output FLAC filename (default: <usb disk>/recording.flac)\n"
       << "  -t, --duration <seconds>   Recording duration, 0 = until Ctrl+C (default: 0)\n"
       << "  -s, --split <minutes>      Split into new file every N minutes, 0 = no split (default: 0)\n"
       << "  -g, --gui                  Launch with graphical interface\n"
@@ -32,6 +85,7 @@ static void print_usage(const char* prog) {
 
 std::optional<Config> parse_args(int argc, char* argv[]) {
   Config cfg;
+  bool output_specified = false;
 
   static struct option long_options[] = {
       {"list-devices", no_argument, nullptr, 'l'},
@@ -67,6 +121,7 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
         break;
       case 'o':
         cfg.output_file = optarg;
+        output_specified = true;
         break;
       case 't':
         cfg.duration_seconds = std::atof(optarg);
@@ -105,6 +160,10 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
   if (cfg.split_seconds < 0) {
     std::cerr << "Error: split must be non-negative\n";
     return std::nullopt;
+  }
+
+  if (!output_specified) {
+    cfg.output_file = default_output_path();
   }
 
   return cfg;
