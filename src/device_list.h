@@ -17,5 +17,6 @@ std::optional<DeviceInfo> find_preferred_device();
 std::optional<DeviceInfo> get_device_info(int index);
 std::vector<DeviceInfo> scan_input_devices();
 bool is_usb_device(const std::string& name);
+std::string find_usb_disk();
 
 }  // namespace recorder

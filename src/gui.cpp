@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <csignal>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <string>
@@ -107,6 +108,10 @@ int run_gui(const Config& config) {
     }
   }
 
+  // Track current USB disk path
+  std::string current_usb_disk = find_usb_disk();
+  std::string output_basename = std::filesystem::path(active_config.output_file).filename().string();
+
   std::string error_msg;
 
   // Stats from last completed recording (for display after stop)
@@ -182,6 +187,19 @@ int run_gui(const Config& config) {
         }
 
         known_devices = current_names;
+
+        // --- USB disk hot-detection ---
+        std::string usb_disk = find_usb_disk();
+        if (usb_disk != current_usb_disk) {
+          current_usb_disk = usb_disk;
+          if (!usb_disk.empty()) {
+            active_config.output_file = usb_disk + "/" + output_basename;
+            std::fprintf(stderr, "USB disk detected: %s\n", usb_disk.c_str());
+          } else {
+            active_config.output_file = output_basename;
+            std::fprintf(stderr, "USB disk removed, output: ./%s\n", output_basename.c_str());
+          }
+        }
       }
     }
 

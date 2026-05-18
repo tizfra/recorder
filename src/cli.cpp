@@ -1,58 +1,16 @@
 #include "cli.h"
 
 #include <getopt.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
-#include <string>
 
 #include "device_list.h"
 
 namespace recorder {
 
 namespace fs = std::filesystem;
-
-static std::string find_usb_disk() {
-#ifdef __APPLE__
-  // macOS: external disks mount under /Volumes/. Skip the boot volume.
-  const fs::path volumes("/Volumes");
-  if (!fs::is_directory(volumes)) return {};
-  for (auto& entry : fs::directory_iterator(volumes)) {
-    if (!entry.is_directory()) continue;
-    auto name = entry.path().filename().string();
-    if (name == "Macintosh HD") continue;
-    // Check it's writable
-    if (access(entry.path().c_str(), W_OK) == 0) {
-      return entry.path().string();
-    }
-  }
-#else
-  // Linux: external disks mount under /media/$USER/ or /mnt/
-  if (const char* user = std::getenv("USER")) {
-    fs::path media = fs::path("/media") / user;
-    if (fs::is_directory(media)) {
-      for (auto& entry : fs::directory_iterator(media)) {
-        if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
-          return entry.path().string();
-        }
-      }
-    }
-  }
-  // Fallback: check /mnt/ for mounted volumes
-  const fs::path mnt("/mnt");
-  if (fs::is_directory(mnt)) {
-    for (auto& entry : fs::directory_iterator(mnt)) {
-      if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
-        return entry.path().string();
-      }
-    }
-  }
-#endif
-  return {};
-}
 
 static std::string unique_filename(const std::string& path) {
   if (!fs::exists(path)) return path;

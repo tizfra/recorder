@@ -1,9 +1,11 @@
 #include "device_list.h"
 
 #include <portaudio.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -129,6 +131,42 @@ void print_input_devices() {
   }
 
   Pa_Terminate();
+}
+
+std::string find_usb_disk() {
+  namespace fs = std::filesystem;
+#ifdef __APPLE__
+  const fs::path volumes("/Volumes");
+  if (!fs::is_directory(volumes)) return {};
+  for (auto& entry : fs::directory_iterator(volumes)) {
+    if (!entry.is_directory()) continue;
+    auto name = entry.path().filename().string();
+    if (name == "Macintosh HD") continue;
+    if (access(entry.path().c_str(), W_OK) == 0) {
+      return entry.path().string();
+    }
+  }
+#else
+  if (const char* user = std::getenv("USER")) {
+    fs::path media = fs::path("/media") / user;
+    if (fs::is_directory(media)) {
+      for (auto& entry : fs::directory_iterator(media)) {
+        if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
+          return entry.path().string();
+        }
+      }
+    }
+  }
+  const fs::path mnt("/mnt");
+  if (fs::is_directory(mnt)) {
+    for (auto& entry : fs::directory_iterator(mnt)) {
+      if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
+        return entry.path().string();
+      }
+    }
+  }
+#endif
+  return {};
 }
 
 }  // namespace recorder
