@@ -176,7 +176,6 @@ std::string find_usb_disk() {
 
 std::string unique_filename(const std::string& path) {
   namespace fs = std::filesystem;
-  if (!fs::exists(path)) return path;
 
   std::string stem, ext;
   auto dot = path.rfind('.');
@@ -187,9 +186,14 @@ std::string unique_filename(const std::string& path) {
     stem = path;
   }
 
+  // Check both the file itself and the first split file (_001)
+  bool in_use = fs::exists(path) || fs::exists(stem + "_001" + ext);
+  if (!in_use) return path;
+
   for (int i = 2; i < 10000; ++i) {
     std::string candidate = stem + "_" + std::to_string(i) + ext;
-    if (!fs::exists(candidate)) return candidate;
+    std::string candidate_split = stem + "_" + std::to_string(i) + "_001" + ext;
+    if (!fs::exists(candidate) && !fs::exists(candidate_split)) return candidate;
   }
   return path;
 }
