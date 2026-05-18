@@ -110,7 +110,7 @@ int run_gui(const Config& config) {
 
   // Track current USB disk path
   std::string current_usb_disk = find_usb_disk();
-  std::string output_basename = std::filesystem::path(active_config.output_file).filename().string();
+  std::string output_basename = std::filesystem::path(active_config.output_file_base).filename().string();
 
   std::string error_msg;
 

@@ -11,6 +11,7 @@ struct Config {
   int sample_rate = 48000;
   int bit_depth = 24;
   std::string output_file = "recording.flac";
+  std::string output_file_base;
   double duration_seconds = 0.0;
   double split_seconds = 0.0;
   bool list_devices = false;

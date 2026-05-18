@@ -144,6 +144,7 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
     cfg.output_file = default_output_path();
   }
 
+  cfg.output_file_base = cfg.output_file;
   cfg.output_file = unique_filename(cfg.output_file);
 
   return cfg;
