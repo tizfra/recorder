@@ -9,6 +9,8 @@
 #include <iostream>
 #include <string>
 
+#include "device_list.h"
+
 namespace recorder {
 
 namespace fs = std::filesystem;
@@ -66,8 +68,8 @@ static void print_usage(const char* prog) {
       << "\n"
       << "Options:\n"
       << "  -l, --list-devices         List available input devices and exit\n"
-      << "  -d, --device <index>       Input device index (default: system default)\n"
-      << "  -c, --channels <n>         Number of channels, 1-32 (default: 2)\n"
+      << "  -d, --device <index>       Input device index (default: USB interface, or first available)\n"
+      << "  -c, --channels <n>         Number of channels, 1-32 (default: device max)\n"
       << "  -r, --rate <hz>            Sample rate in Hz (default: 48000)\n"
       << "  -b, --bits <n>             Bit depth: 16 or 24 (default: 24)\n"
       << "  -o, --output <file>        Output FLAC filename (default: <usb disk>/recording.flac)\n"
@@ -86,6 +88,8 @@ static void print_usage(const char* prog) {
 std::optional<Config> parse_args(int argc, char* argv[]) {
   Config cfg;
   bool output_specified = false;
+  bool device_specified = false;
+  bool channels_specified = false;
 
   static struct option long_options[] = {
       {"list-devices", no_argument, nullptr, 'l'},
@@ -109,9 +113,11 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
         return cfg;
       case 'd':
         cfg.device_index = std::atoi(optarg);
+        device_specified = true;
         break;
       case 'c':
         cfg.channels = std::atoi(optarg);
+        channels_specified = true;
         break;
       case 'r':
         cfg.sample_rate = std::atoi(optarg);
@@ -138,6 +144,23 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
       default:
         print_usage(argv[0]);
         return std::nullopt;
+    }
+  }
+
+  if (!device_specified) {
+    auto preferred = find_preferred_device();
+    if (preferred) {
+      cfg.device_index = preferred->index;
+      if (!channels_specified) {
+        cfg.channels = preferred->max_input_channels;
+      }
+      std::cerr << "Selected device: " << preferred->name << " (" << preferred->max_input_channels
+                << "ch)\n";
+    }
+  } else if (!channels_specified) {
+    auto info = get_device_info(cfg.device_index);
+    if (info) {
+      cfg.channels = info->max_input_channels;
     }
   }
 
