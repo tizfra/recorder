@@ -8,10 +8,14 @@
 #include <GLFW/glfw3.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <csignal>
+#include <memory>
+#include <set>
 #include <string>
 
+#include "device_list.h"
 #include "recorder.h"
 
 namespace recorder {
@@ -71,26 +75,96 @@ int run_gui(const Config& config) {
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
 
-  Recorder rec(config);
-  bool device_ok = rec.open();
-  std::string error_msg;
-  if (!device_ok) {
-    error_msg = "Failed to open audio device. Check --list-devices.";
+  // Mutable config for device hot-switching
+  Config active_config = config;
+
+  // Recorder is created on-demand when Record is pressed
+  std::unique_ptr<Recorder> rec;
+
+  // Device scanning state
+  std::set<std::string> known_devices;
+  auto last_scan = std::chrono::steady_clock::now();
+  constexpr double scan_interval_secs = 2.0;
+
+  // Seed known devices from initial scan
+  {
+    auto devices = scan_input_devices();
+    for (auto& d : devices) {
+      known_devices.insert(d.name);
+    }
   }
+
+  // Track selected device name for display
+  std::string selected_device_name;
+  int selected_channels = active_config.channels;
+  {
+    auto preferred = find_preferred_device();
+    if (preferred) {
+      active_config.device_index = preferred->index;
+      active_config.channels = preferred->max_input_channels;
+      selected_device_name = preferred->name;
+      selected_channels = preferred->max_input_channels;
+    }
+  }
+
+  std::string error_msg;
+
+  // Stats from last completed recording (for display after stop)
+  uint64_t last_total_frames = 0;
+  uint64_t last_overruns = 0;
+  int last_files_written = 0;
+  double last_elapsed = 0.0;
 
   while (!glfwWindowShouldClose(window) && g_gui_running.load(std::memory_order_relaxed)) {
     glfwPollEvents();
 
+    bool is_idle = !rec || rec->state() == Recorder::State::Idle ||
+                   rec->state() == Recorder::State::Stopped;
+
+    // --- Device hot-detection while not recording ---
+    if (is_idle) {
+      auto now = std::chrono::steady_clock::now();
+      double since_scan = std::chrono::duration<double>(now - last_scan).count();
+      if (since_scan >= scan_interval_secs) {
+        last_scan = now;
+        auto devices = scan_input_devices();
+
+        // Check for newly appeared USB devices
+        for (auto& d : devices) {
+          if (known_devices.find(d.name) == known_devices.end()) {
+            // New device appeared
+            known_devices.insert(d.name);
+            if (is_usb_device(d.name)) {
+              active_config.device_index = d.index;
+              active_config.channels = d.max_input_channels;
+              selected_device_name = d.name;
+              selected_channels = d.max_input_channels;
+              rec.reset();
+              error_msg.clear();
+              std::fprintf(stderr, "New USB device detected: %s (%dch)\n", d.name.c_str(),
+                           d.max_input_channels);
+            }
+          }
+        }
+
+        // Update known set (remove disappeared devices)
+        std::set<std::string> current_names;
+        for (auto& d : devices) {
+          current_names.insert(d.name);
+        }
+        known_devices = current_names;
+      }
+    }
+
     // Auto-stop on duration
-    auto state = rec.state();
-    if (state == Recorder::State::Recording && config.duration_seconds > 0 &&
-        rec.elapsed_seconds() >= config.duration_seconds) {
-      rec.stop();
+    if (rec && rec->state() == Recorder::State::Recording && active_config.duration_seconds > 0 &&
+        rec->elapsed_seconds() >= active_config.duration_seconds) {
+      rec->stop();
     }
 
     // Auto-stop on writer error
-    if (state == Recorder::State::Recording && rec.has_error()) {
-      rec.stop();
+    if (rec && rec->state() == Recorder::State::Recording && rec->has_error()) {
+      rec->stop();
       error_msg = "FLAC writer error. Recording stopped.";
     }
 
@@ -106,7 +180,8 @@ int run_gui(const Config& config) {
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
-    state = rec.state();
+    Recorder::State state =
+        rec ? rec->state() : Recorder::State::Idle;
 
     // --- Header ---
     ImGui::TextUnformatted("Audio Recorder");
@@ -114,15 +189,17 @@ int run_gui(const Config& config) {
     ImGui::Spacing();
 
     // --- Device info ---
-    if (device_ok) {
-      ImGui::Text("Device: %s", rec.device_name().c_str());
-      ImGui::Text("Config: %dch, %dHz, %dbit", config.channels, config.sample_rate,
-                   config.bit_depth);
-      ImGui::Text("Output: %s", config.output_file.c_str());
-      if (config.split_seconds > 0) {
-        ImGui::SameLine();
-        ImGui::Text(" (split every %.0fm)", config.split_seconds / 60.0);
-      }
+    if (!selected_device_name.empty()) {
+      ImGui::Text("Device: %s", selected_device_name.c_str());
+    } else {
+      ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
+    }
+    ImGui::Text("Config: %dch, %dHz, %dbit", active_config.channels, active_config.sample_rate,
+                active_config.bit_depth);
+    ImGui::Text("Output: %s", active_config.output_file.c_str());
+    if (active_config.split_seconds > 0) {
+      ImGui::SameLine();
+      ImGui::Text(" (split every %.0fm)", active_config.split_seconds / 60.0);
     }
 
     ImGui::Spacing();
@@ -161,28 +238,39 @@ int run_gui(const Config& config) {
     ImGui::Text("%s", status_text);
 
     // --- Time and stats ---
-    if (state != Recorder::State::Idle) {
+    bool show_stats = rec && state != Recorder::State::Idle;
+    if (show_stats) {
       char time_buf[32];
-      format_time(rec.elapsed_seconds(), time_buf, sizeof(time_buf));
+      format_time(rec->elapsed_seconds(), time_buf, sizeof(time_buf));
       ImGui::Text("Time:   %s", time_buf);
 
-      std::string cur_file = rec.current_file();
+      std::string cur_file = rec->current_file();
       if (!cur_file.empty()) {
         ImGui::Text("File:   %s", cur_file.c_str());
       }
 
-      uint64_t frames = rec.total_frames();
+      uint64_t frames = rec->total_frames();
       ImGui::Text("Frames: %llu", static_cast<unsigned long long>(frames));
 
-      uint64_t overruns = rec.overruns();
+      uint64_t overruns = rec->overruns();
       if (overruns > 0) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Overruns: %llu",
                            static_cast<unsigned long long>(overruns));
       }
 
-      int fc = rec.files_written();
+      int fc = rec->files_written();
       if (fc > 1) {
         ImGui::Text("Files:  %d", fc);
+      }
+    } else if (state == Recorder::State::Idle && last_total_frames > 0) {
+      // Show summary from last recording
+      char time_buf[32];
+      format_time(last_elapsed, time_buf, sizeof(time_buf));
+      ImGui::Text("Last:   %s, %llu frames", time_buf,
+                  static_cast<unsigned long long>(last_total_frames));
+      if (last_files_written > 1) {
+        ImGui::SameLine();
+        ImGui::Text(" (%d files)", last_files_written);
       }
     }
 
@@ -197,63 +285,72 @@ int run_gui(const Config& config) {
     ImGui::Spacing();
 
     // --- Buttons ---
-    if (!device_ok) {
-      ImGui::BeginDisabled();
-      ImGui::Button("Record", ImVec2(120, 36));
-      ImGui::SameLine();
-      ImGui::Button("Pause", ImVec2(120, 36));
-      ImGui::SameLine();
-      ImGui::Button("Stop", ImVec2(120, 36));
-      ImGui::EndDisabled();
-    } else {
-      // Record button
-      bool can_record = state == Recorder::State::Idle;
-      if (!can_record) ImGui::BeginDisabled();
-      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
-      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
-      if (ImGui::Button("Record", ImVec2(120, 36))) {
-        error_msg.clear();
-        if (!rec.start()) {
-          error_msg = "Failed to start recording.";
-        }
+    bool has_device = !selected_device_name.empty();
+
+    // Record button
+    bool can_record = has_device && (state == Recorder::State::Idle || state == Recorder::State::Stopped);
+    if (!can_record) ImGui::BeginDisabled();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
+    if (ImGui::Button("Record", ImVec2(120, 36))) {
+      error_msg.clear();
+      // Save stats from previous recording before resetting
+      if (rec) {
+        last_total_frames = rec->total_frames();
+        last_overruns = rec->overruns();
+        last_files_written = rec->files_written();
+        last_elapsed = rec->elapsed_seconds();
       }
-      ImGui::PopStyleColor(3);
-      if (!can_record) ImGui::EndDisabled();
-
-      ImGui::SameLine();
-
-      // Pause / Resume button
-      bool can_pause = state == Recorder::State::Recording || state == Recorder::State::Paused;
-      if (!can_pause) ImGui::BeginDisabled();
-      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.6f, 0.1f, 1.0f));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
-      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.5f, 0.05f, 1.0f));
-      const char* pause_label = state == Recorder::State::Paused ? "Resume" : "Pause";
-      if (ImGui::Button(pause_label, ImVec2(120, 36))) {
-        if (state == Recorder::State::Paused) {
-          rec.resume();
-        } else {
-          rec.pause();
-        }
+      rec = std::make_unique<Recorder>(active_config);
+      if (!rec->open()) {
+        error_msg = "Failed to open audio device.";
+        rec.reset();
+      } else if (!rec->start()) {
+        error_msg = "Failed to start recording.";
+        rec.reset();
       }
-      ImGui::PopStyleColor(3);
-      if (!can_pause) ImGui::EndDisabled();
-
-      ImGui::SameLine();
-
-      // Stop button
-      bool can_stop = state == Recorder::State::Recording || state == Recorder::State::Paused;
-      if (!can_stop) ImGui::BeginDisabled();
-      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.25f, 0.25f, 1.0f));
-      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
-      if (ImGui::Button("Stop", ImVec2(120, 36))) {
-        rec.stop();
-      }
-      ImGui::PopStyleColor(3);
-      if (!can_stop) ImGui::EndDisabled();
     }
+    ImGui::PopStyleColor(3);
+    if (!can_record) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
+    // Pause / Resume button
+    bool can_pause = state == Recorder::State::Recording || state == Recorder::State::Paused;
+    if (!can_pause) ImGui::BeginDisabled();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.6f, 0.1f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.5f, 0.05f, 1.0f));
+    const char* pause_label = state == Recorder::State::Paused ? "Resume" : "Pause";
+    if (ImGui::Button(pause_label, ImVec2(120, 36))) {
+      if (state == Recorder::State::Paused) {
+        rec->resume();
+      } else {
+        rec->pause();
+      }
+    }
+    ImGui::PopStyleColor(3);
+    if (!can_pause) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
+    // Stop button
+    bool can_stop = state == Recorder::State::Recording || state == Recorder::State::Paused;
+    if (!can_stop) ImGui::BeginDisabled();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.25f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
+    if (ImGui::Button("Stop", ImVec2(120, 36))) {
+      rec->stop();
+      last_total_frames = rec->total_frames();
+      last_overruns = rec->overruns();
+      last_files_written = rec->files_written();
+      last_elapsed = rec->elapsed_seconds();
+      rec.reset();
+    }
+    ImGui::PopStyleColor(3);
+    if (!can_stop) ImGui::EndDisabled();
 
     ImGui::End();
     ImGui::Render();
@@ -269,24 +366,27 @@ int run_gui(const Config& config) {
   }
 
   // Clean up if still recording when window is closed
-  if (rec.state() == Recorder::State::Recording || rec.state() == Recorder::State::Paused) {
-    rec.stop();
-  }
-
-  auto stats_frames = rec.total_frames();
-  if (stats_frames > 0) {
-    double duration = static_cast<double>(stats_frames) / config.sample_rate;
-    std::fprintf(stderr, "\nDone. %llu frames (%.1fs)",
-                 static_cast<unsigned long long>(stats_frames), duration);
-    int fc = rec.files_written();
-    if (fc > 1) {
-      std::fprintf(stderr, " across %d files", fc);
+  if (rec) {
+    auto s = rec->state();
+    if (s == Recorder::State::Recording || s == Recorder::State::Paused) {
+      rec->stop();
     }
-    std::fprintf(stderr, "\n");
-    auto ov = rec.overruns();
-    if (ov > 0) {
-      std::fprintf(stderr, "Warning: %llu frames dropped (buffer overrun)\n",
-                   static_cast<unsigned long long>(ov));
+
+    auto stats_frames = rec->total_frames();
+    if (stats_frames > 0) {
+      double duration = static_cast<double>(stats_frames) / active_config.sample_rate;
+      std::fprintf(stderr, "\nDone. %llu frames (%.1fs)",
+                   static_cast<unsigned long long>(stats_frames), duration);
+      int fc = rec->files_written();
+      if (fc > 1) {
+        std::fprintf(stderr, " across %d files", fc);
+      }
+      std::fprintf(stderr, "\n");
+      auto ov = rec->overruns();
+      if (ov > 0) {
+        std::fprintf(stderr, "Warning: %llu frames dropped (buffer overrun)\n",
+                     static_cast<unsigned long long>(ov));
+      }
     }
   }
 

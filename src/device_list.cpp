@@ -23,8 +23,24 @@ static bool is_builtin_or_virtual(const char* name) {
 }
 
 static bool looks_like_usb(const char* name) {
-  // Linux ALSA typically includes "USB" in USB device names
   return std::strstr(name, "USB") || std::strstr(name, "usb");
+}
+
+bool is_usb_device(const std::string& name) {
+  return looks_like_usb(name.c_str()) || !is_builtin_or_virtual(name.c_str());
+}
+
+std::vector<DeviceInfo> scan_input_devices() {
+  std::vector<DeviceInfo> devices;
+  Pa_Initialize();
+  int count = Pa_GetDeviceCount();
+  for (int i = 0; i < count; ++i) {
+    const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+    if (!info || info->maxInputChannels <= 0) continue;
+    devices.push_back({i, info->maxInputChannels, info->name});
+  }
+  Pa_Terminate();
+  return devices;
 }
 
 std::optional<DeviceInfo> find_preferred_device() {
