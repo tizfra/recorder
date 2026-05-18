@@ -401,6 +401,10 @@ int run_gui(const Config& config) {
       last_files_written = rec->files_written();
       last_elapsed = rec->elapsed_seconds();
       rec.reset();
+      std::string base = current_usb_disk.empty()
+                             ? output_basename
+                             : current_usb_disk + "/" + output_basename;
+      active_config.output_file = unique_filename(base);
     }
     ImGui::PopStyleColor(3);
     if (!can_stop) ImGui::EndDisabled();
