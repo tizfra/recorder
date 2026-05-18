@@ -18,6 +18,9 @@ static bool is_builtin_or_virtual(const char* name) {
       "BlackHole",  "Soundflower", "Loopback",
       "default",    "pulse",      "sysdefault",
       "dmix",       "surround",   "front:",
+      "lavrate",    "samplerate", "speexrate",
+      "speex",      "upmix",      "vdownmix",
+      "usbstream",  "jack",       "oss",
   };
   for (auto* pattern : skip_patterns) {
     if (std::strstr(name, pattern)) return true;
