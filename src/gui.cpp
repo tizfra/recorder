@@ -112,6 +112,8 @@ int run_gui(const Config& config) {
   std::string current_usb_disk = find_usb_disk();
   std::string output_basename = std::filesystem::path(active_config.output_file_base).filename().string();
 
+  float split_minutes = static_cast<float>(active_config.split_seconds / 60.0);
+
   std::string error_msg;
 
   // Stats from last completed recording (for display after stop)
@@ -248,7 +250,6 @@ int run_gui(const Config& config) {
     ImGui::Text("Output: %s", active_config.output_file.c_str());
 
     bool is_recording = state == Recorder::State::Recording || state == Recorder::State::Paused;
-    static float split_minutes = static_cast<float>(active_config.split_seconds / 60.0);
     if (is_recording) {
       if (active_config.split_seconds > 0) {
         ImGui::Text("Split:  every %.0f min", split_minutes);
