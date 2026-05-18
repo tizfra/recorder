@@ -351,7 +351,10 @@ int run_gui(const Config& config) {
         last_files_written = rec->files_written();
         last_elapsed = rec->elapsed_seconds();
       }
-      active_config.output_file = unique_filename(active_config.output_file);
+      std::string base = current_usb_disk.empty()
+                             ? output_basename
+                             : current_usb_disk + "/" + output_basename;
+      active_config.output_file = unique_filename(base);
       rec = std::make_unique<Recorder>(active_config);
       if (!rec->open()) {
         error_msg = "Failed to open audio device.";
