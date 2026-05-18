@@ -246,9 +246,23 @@ int run_gui(const Config& config) {
     ImGui::Text("Config: %dch, %dHz, %dbit", active_config.channels, active_config.sample_rate,
                 active_config.bit_depth);
     ImGui::Text("Output: %s", active_config.output_file.c_str());
-    if (active_config.split_seconds > 0) {
+
+    bool is_recording = state == Recorder::State::Recording || state == Recorder::State::Paused;
+    static float split_minutes = static_cast<float>(active_config.split_seconds / 60.0);
+    if (is_recording) {
+      if (active_config.split_seconds > 0) {
+        ImGui::Text("Split:  every %.0f min", split_minutes);
+      } else {
+        ImGui::Text("Split:  off");
+      }
+    } else {
+      ImGui::SetNextItemWidth(120);
+      if (ImGui::InputFloat("Split (min)", &split_minutes, 1.0f, 5.0f, "%.0f")) {
+        if (split_minutes < 0) split_minutes = 0;
+        active_config.split_seconds = split_minutes * 60.0;
+      }
       ImGui::SameLine();
-      ImGui::Text(" (split every %.0fm)", active_config.split_seconds / 60.0);
+      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "0 = no split");
     }
 
     ImGui::Spacing();
