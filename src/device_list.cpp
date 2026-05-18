@@ -186,14 +186,24 @@ std::string unique_filename(const std::string& path) {
     stem = path;
   }
 
-  // Check both the file itself and the first split file (_001)
-  bool in_use = fs::exists(path) || fs::exists(stem + "_001" + ext);
+  auto has_split_files = [&](const std::string& s) {
+    std::error_code ec;
+    auto parent = fs::path(s).parent_path();
+    auto prefix = fs::path(s).stem().string() + "_";
+    if (parent.empty()) parent = ".";
+    for (auto& entry : fs::directory_iterator(parent, ec)) {
+      auto name = entry.path().filename().string();
+      if (name.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+  };
+
+  bool in_use = fs::exists(path) || has_split_files(stem + ext);
   if (!in_use) return path;
 
   for (int i = 2; i < 10000; ++i) {
     std::string candidate = stem + "_" + std::to_string(i) + ext;
-    std::string candidate_split = stem + "_" + std::to_string(i) + "_001" + ext;
-    if (!fs::exists(candidate) && !fs::exists(candidate_split)) return candidate;
+    if (!fs::exists(candidate) && !has_split_files(candidate)) return candidate;
   }
   return path;
 }
