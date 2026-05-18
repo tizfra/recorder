@@ -29,7 +29,7 @@ static void print_usage(const char* prog) {
       << "  -b, --bits <n>             Bit depth: 16 or 24 (default: 24)\n"
       << "  -o, --output <file>        Output FLAC filename (default: <usb disk>/recording.flac)\n"
       << "  -t, --duration <seconds>   Recording duration, 0 = until Ctrl+C (default: 0)\n"
-      << "  -s, --split <minutes>      Split into new file every N minutes, 0 = no split (default: 0)\n"
+      << "  -s, --split <minutes>      Split into new file every N minutes, 0 = no split (default: 30)\n"
       << "  -g, --gui                  Launch with graphical interface\n"
       << "  -h, --help                 Show this help message\n"
       << "\n"

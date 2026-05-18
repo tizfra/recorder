@@ -13,7 +13,7 @@ struct Config {
   std::string output_file = "recording.flac";
   std::string output_file_base;
   double duration_seconds = 0.0;
-  double split_seconds = 0.0;
+  double split_seconds = 1800.0;
   bool list_devices = false;
   bool gui = false;
 };
