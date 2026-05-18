@@ -14,6 +14,7 @@ struct Config {
   double duration_seconds = 0.0;
   double split_seconds = 0.0;
   bool list_devices = false;
+  bool gui = false;
 };
 
 std::optional<Config> parse_args(int argc, char* argv[]);

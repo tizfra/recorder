@@ -20,6 +20,7 @@ static void print_usage(const char* prog) {
       << "  -o, --output <file>        Output FLAC filename (default: recording.flac)\n"
       << "  -t, --duration <seconds>   Recording duration, 0 = until Ctrl+C (default: 0)\n"
       << "  -s, --split <minutes>      Split into new file every N minutes, 0 = no split (default: 0)\n"
+      << "  -g, --gui                  Launch with graphical interface\n"
       << "  -h, --help                 Show this help message\n"
       << "\n"
       << "Examples:\n"
@@ -41,12 +42,13 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
       {"output", required_argument, nullptr, 'o'},
       {"duration", required_argument, nullptr, 't'},
       {"split", required_argument, nullptr, 's'},
+      {"gui", no_argument, nullptr, 'g'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "ld:c:r:b:o:t:s:h", long_options, nullptr)) != -1) {
+  while ((opt = getopt_long(argc, argv, "ld:c:r:b:o:t:s:gh", long_options, nullptr)) != -1) {
     switch (opt) {
       case 'l':
         cfg.list_devices = true;
@@ -71,6 +73,9 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
         break;
       case 's':
         cfg.split_seconds = std::atof(optarg) * 60.0;
+        break;
+      case 'g':
+        cfg.gui = true;
         break;
       case 'h':
         print_usage(argv[0]);

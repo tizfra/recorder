@@ -5,12 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(BUILD_GUI "Build with GUI support (requires OpenGL)" ON)
+
 find_package(PkgConfig QUIET)
 
 # --- PortAudio ---
-# Try pkg-config first (works on Linux and macOS with homebrew/pkg-config installed),
-# then fall back to find_library (works with homebrew on macOS without pkg-config),
-# then fall back to FetchContent (builds from source).
 set(PORTAUDIO_FOUND FALSE)
 
 if(PkgConfig_FOUND)
@@ -86,8 +85,50 @@ if(NOT FLAC_DEP_FOUND)
     add_library(flac_dep ALIAS FLAC)
 endif()
 
+# --- GUI dependencies (optional) ---
+if(BUILD_GUI)
+    include(FetchContent)
+
+    FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG        3.4
+        GIT_SHALLOW    TRUE
+    )
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glfw)
+
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        v1.91.4
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(imgui)
+
+    add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+    target_include_directories(imgui PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+    )
+    target_link_libraries(imgui PUBLIC glfw)
+
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui PUBLIC OpenGL::GL)
+endif()
+
 # --- Application ---
-add_executable(recorder
+set(RECORDER_SOURCES
     src/main.cpp
     src/cli.cpp
     src/device_list.cpp
@@ -95,8 +136,19 @@ add_executable(recorder
     src/recorder.cpp
 )
 
+if(BUILD_GUI)
+    list(APPEND RECORDER_SOURCES src/gui.cpp)
+endif()
+
+add_executable(recorder ${RECORDER_SOURCES})
+
 target_include_directories(recorder PRIVATE src)
 target_link_libraries(recorder PRIVATE portaudio_dep flac_dep)
+
+if(BUILD_GUI)
+    target_link_libraries(recorder PRIVATE imgui)
+    target_compile_definitions(recorder PRIVATE HAS_GUI=1)
+endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(recorder PRIVATE Threads::Threads)

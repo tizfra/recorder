@@ -7,6 +7,10 @@
 #include "device_list.h"
 #include "recorder.h"
 
+#ifdef HAS_GUI
+#include "gui.h"
+#endif
+
 static std::atomic<bool> g_running{true};
 
 static void signal_handler(int) { g_running.store(false, std::memory_order_relaxed); }
@@ -18,6 +22,15 @@ int main(int argc, char* argv[]) {
   if (cfg->list_devices) {
     recorder::print_input_devices();
     return 0;
+  }
+
+  if (cfg->gui) {
+#ifdef HAS_GUI
+    return recorder::run_gui(*cfg);
+#else
+    std::cerr << "Error: GUI not available (built without -DBUILD_GUI=ON)\n";
+    return 1;
+#endif
   }
 
   std::signal(SIGINT, signal_handler);
