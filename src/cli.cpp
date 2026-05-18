@@ -54,6 +54,25 @@ static std::string find_usb_disk() {
   return {};
 }
 
+static std::string unique_filename(const std::string& path) {
+  if (!fs::exists(path)) return path;
+
+  std::string stem, ext;
+  auto dot = path.rfind('.');
+  if (dot != std::string::npos) {
+    stem = path.substr(0, dot);
+    ext = path.substr(dot);
+  } else {
+    stem = path;
+  }
+
+  for (int i = 2; i < 10000; ++i) {
+    std::string candidate = stem + "_" + std::to_string(i) + ext;
+    if (!fs::exists(candidate)) return candidate;
+  }
+  return path;
+}
+
 static std::string default_output_path() {
   std::string usb = find_usb_disk();
   if (!usb.empty()) {
@@ -188,6 +207,8 @@ std::optional<Config> parse_args(int argc, char* argv[]) {
   if (!output_specified) {
     cfg.output_file = default_output_path();
   }
+
+  cfg.output_file = unique_filename(cfg.output_file);
 
   return cfg;
 }
