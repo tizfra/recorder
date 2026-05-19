@@ -352,12 +352,14 @@ void Recorder::writer_thread_func() {
   bool use_splits = frames_per_split > 0;
   std::vector<ChannelGroup> groups;
 
+  const int channels_per_group = multi_group ? MAX_FLAC_CHANNELS : channels;
+
   auto make_group_writers = [&](const std::string& base) -> bool {
     groups.clear();
     for (int g = 0; g < num_groups; ++g) {
       ChannelGroup cg;
-      cg.first_ch = g * MAX_FLAC_CHANNELS;
-      cg.group_channels = std::min(MAX_FLAC_CHANNELS, channels - cg.first_ch);
+      cg.first_ch = g * channels_per_group;
+      cg.group_channels = std::min(channels_per_group, channels - cg.first_ch);
 
       if (multi_group) {
         cg.filename = make_channel_group_filename(base, cg.first_ch + 1,
