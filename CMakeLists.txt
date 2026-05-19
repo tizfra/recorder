@@ -155,3 +155,22 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(recorder PRIVATE Threads::Threads)
+
+# --- Tests ---
+enable_testing()
+
+add_executable(recorder_tests
+    tests/test_pipeline.cpp
+    src/audio_writer.cpp
+    src/flac_writer.cpp
+    src/wav_writer.cpp
+    src/device_list.cpp
+)
+
+target_include_directories(recorder_tests PRIVATE src)
+target_link_libraries(recorder_tests PRIVATE flac_dep Threads::Threads)
+
+# device_list.cpp uses portaudio for scan functions
+target_link_libraries(recorder_tests PRIVATE portaudio_dep)
+
+add_test(NAME pipeline_tests COMMAND recorder_tests)
