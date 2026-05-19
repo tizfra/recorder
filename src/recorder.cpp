@@ -11,6 +11,8 @@
 #include <thread>
 #include <vector>
 
+#include <filesystem>
+
 #include "flac_writer.h"
 #include "ring_buffer.h"
 
@@ -215,6 +217,8 @@ int Recorder::pa_callback(const void* input, void* /*output*/, unsigned long fra
   return paContinue;
 }
 
+static constexpr uint64_t max_file_bytes = 4000000000ULL;
+
 void Recorder::writer_thread_func() {
   const int channels = _config.channels;
   const size_t batch_samples = 4096 * channels;
@@ -224,11 +228,11 @@ void Recorder::writer_thread_func() {
   if (_config.split_seconds > 0) {
     frames_per_split = static_cast<uint64_t>(_config.split_seconds * _config.sample_rate);
   }
-  bool splitting = frames_per_split > 0;
 
   int file_index = 1;
+  bool use_splits = frames_per_split > 0;
   std::string filename =
-      splitting ? make_split_filename(_config.output_file, file_index) : _config.output_file;
+      use_splits ? make_split_filename(_config.output_file, file_index) : _config.output_file;
 
   {
     std::lock_guard<std::mutex> lock(_file_mutex);
@@ -241,11 +245,32 @@ void Recorder::writer_thread_func() {
     _writer_error.store(true, std::memory_order_relaxed);
     return;
   }
-  if (splitting) {
-    std::cerr << "  → " << filename << "\n";
-  }
+  std::cerr << "  → " << filename << "\n";
 
   uint64_t current_file_frames = 0;
+
+  auto rotate = [&]() -> bool {
+    writer->finalize();
+    _file_count.store(file_index, std::memory_order_relaxed);
+
+    ++file_index;
+    use_splits = true;
+    filename = make_split_filename(_config.output_file, file_index);
+    {
+      std::lock_guard<std::mutex> lock(_file_mutex);
+      _current_file = filename;
+    }
+
+    writer =
+        std::make_unique<FlacWriter>(filename, channels, _config.sample_rate, _config.bit_depth);
+    if (!writer->init()) {
+      _writer_error.store(true, std::memory_order_relaxed);
+      return false;
+    }
+    std::cerr << "  → " << filename << "\n";
+    current_file_frames = 0;
+    return true;
+  };
 
   while (_writer_running.load(std::memory_order_relaxed) || _ring->read_available() > 0) {
     size_t avail = _ring->read_available();
@@ -261,39 +286,22 @@ void Recorder::writer_thread_func() {
     size_t got = _ring->read(buf.data(), to_read);
     size_t frames = got / channels;
 
-    if (splitting && current_file_frames + frames >= frames_per_split) {
-      size_t frames_remaining = frames_per_split - current_file_frames;
-      if (frames_remaining > 0) {
-        if (!writer->write_samples(buf.data(), frames_remaining)) {
+    // Time-based rotation
+    if (frames_per_split > 0 && current_file_frames + frames >= frames_per_split) {
+      size_t fit = frames_per_split - current_file_frames;
+      if (fit > 0) {
+        if (!writer->write_samples(buf.data(), fit)) {
           _writer_error.store(true, std::memory_order_relaxed);
           return;
         }
+        _total_frames.fetch_add(fit, std::memory_order_relaxed);
       }
 
-      _total_frames.fetch_add(frames_remaining, std::memory_order_relaxed);
-      writer->finalize();
-      _file_count.store(file_index, std::memory_order_relaxed);
+      if (!rotate()) return;
 
-      ++file_index;
-      filename = make_split_filename(_config.output_file, file_index);
-      {
-        std::lock_guard<std::mutex> lock(_file_mutex);
-        _current_file = filename;
-      }
-
-      writer =
-          std::make_unique<FlacWriter>(filename, channels, _config.sample_rate, _config.bit_depth);
-      if (!writer->init()) {
-        _writer_error.store(true, std::memory_order_relaxed);
-        return;
-      }
-      std::cerr << "  → " << filename << "\n";
-      current_file_frames = 0;
-
-      size_t leftover = frames - frames_remaining;
+      size_t leftover = frames - fit;
       if (leftover > 0) {
-        const int32_t* leftover_ptr = buf.data() + frames_remaining * channels;
-        if (!writer->write_samples(leftover_ptr, leftover)) {
+        if (!writer->write_samples(buf.data() + fit * channels, leftover)) {
           _writer_error.store(true, std::memory_order_relaxed);
           return;
         }
@@ -309,6 +317,13 @@ void Recorder::writer_thread_func() {
     }
     current_file_frames += frames;
     _total_frames.fetch_add(frames, std::memory_order_relaxed);
+
+    // Size-based rotation
+    std::error_code ec;
+    auto size = std::filesystem::file_size(filename, ec);
+    if (!ec && size >= max_file_bytes) {
+      if (!rotate()) return;
+    }
   }
 
   writer->finalize();
