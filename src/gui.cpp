@@ -58,7 +58,7 @@ int run_gui(const Config& config) {
 #endif
 
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-  GLFWwindow* window = glfwCreateWindow(480, 320, "Audio Recorder", nullptr, nullptr);
+  GLFWwindow* window = glfwCreateWindow(480, 500, "Audio Recorder", nullptr, nullptr);
   if (!window) {
     std::fprintf(stderr, "Error: failed to create window\n");
     glfwTerminate();
@@ -114,6 +114,15 @@ int run_gui(const Config& config) {
 
   float split_minutes = static_cast<float>(active_config.split_seconds / 60.0);
 
+  // Audio monitor for VU meters when not recording
+  AudioMonitor monitor;
+  if (active_config.device_index >= 0) {
+    monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+  }
+
+  // Smoothed levels for display
+  float display_peak[MAX_CHANNELS] = {};
+
   std::string error_msg;
 
   // Stats from last completed recording (for display after stop)
@@ -147,6 +156,8 @@ int run_gui(const Config& config) {
               selected_device_name = d.name;
               selected_channels = d.max_input_channels;
               rec.reset();
+              monitor.stop();
+              monitor.start(d.index, d.max_input_channels, active_config.sample_rate);
               error_msg.clear();
               std::fprintf(stderr, "New USB device detected: %s (%dch)\n", d.name.c_str(),
                            d.max_input_channels);
@@ -362,13 +373,16 @@ int run_gui(const Config& config) {
                              ? output_basename
                              : current_usb_disk + "/" + output_basename;
       active_config.output_file = unique_filename(base);
+      monitor.stop();
       rec = std::make_unique<Recorder>(active_config);
       if (!rec->open()) {
         error_msg = "Failed to open audio device.";
         rec.reset();
+        monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
       } else if (!rec->start()) {
         error_msg = "Failed to start recording.";
         rec.reset();
+        monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
       }
     }
     ImGui::PopStyleColor(3);
@@ -408,6 +422,7 @@ int run_gui(const Config& config) {
       last_files_written = rec->files_written();
       last_elapsed = rec->elapsed_seconds();
       rec.reset();
+      monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
       std::string base = current_usb_disk.empty()
                              ? output_basename
                              : current_usb_disk + "/" + output_basename;
@@ -415,6 +430,61 @@ int run_gui(const Config& config) {
     }
     ImGui::PopStyleColor(3);
     if (!can_stop) ImGui::EndDisabled();
+
+    // --- VU Meters ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    LevelData* lvl = nullptr;
+    if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
+      lvl = &rec->levels();
+    } else if (monitor.running()) {
+      lvl = &monitor.levels;
+    }
+
+    int meter_channels = lvl ? lvl->channels.load(std::memory_order_relaxed) : active_config.channels;
+    float avail_width = ImGui::GetContentRegionAvail().x;
+
+    for (int c = 0; c < meter_channels; ++c) {
+      float raw = lvl ? lvl->peak[c].load(std::memory_order_relaxed) : 0.0f;
+      // Smooth decay
+      if (raw >= display_peak[c]) {
+        display_peak[c] = raw;
+      } else {
+        display_peak[c] *= 0.92f;
+      }
+      float level = display_peak[c];
+
+      char label[16];
+      std::snprintf(label, sizeof(label), "%d", c + 1);
+      ImGui::Text("%s", label);
+      ImGui::SameLine(30);
+
+      float bar_width = (avail_width - 35) * level;
+      ImVec2 pos = ImGui::GetCursorScreenPos();
+      float bar_height = ImGui::GetTextLineHeight();
+      ImDrawList* draw = ImGui::GetWindowDrawList();
+
+      // Background
+      draw->AddRectFilled(pos, ImVec2(pos.x + avail_width - 35, pos.y + bar_height),
+                          IM_COL32(40, 40, 40, 255));
+
+      if (bar_width > 0) {
+        // Color: green → yellow → red
+        ImU32 color;
+        if (level < 0.5f) {
+          color = IM_COL32(30, 180, 30, 255);
+        } else if (level < 0.85f) {
+          color = IM_COL32(220, 180, 20, 255);
+        } else {
+          color = IM_COL32(220, 40, 40, 255);
+        }
+        draw->AddRectFilled(pos, ImVec2(pos.x + bar_width, pos.y + bar_height), color);
+      }
+
+      ImGui::Dummy(ImVec2(avail_width - 35, bar_height));
+    }
 
     ImGui::End();
     ImGui::Render();
@@ -428,6 +498,8 @@ int run_gui(const Config& config) {
 
     glfwSwapBuffers(window);
   }
+
+  monitor.stop();
 
   // Clean up if still recording when window is closed
   if (rec) {

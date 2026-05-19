@@ -18,6 +18,89 @@
 
 namespace recorder {
 
+static void compute_peaks(const int32_t* input, unsigned long frames, int channels,
+                           LevelData& levels) {
+  float peak[MAX_CHANNELS] = {};
+  for (unsigned long i = 0; i < frames; ++i) {
+    for (int c = 0; c < channels; ++c) {
+      float v = std::abs(input[i * channels + c]) / 2147483648.0f;
+      if (v > peak[c]) peak[c] = v;
+    }
+  }
+  levels.channels.store(channels, std::memory_order_relaxed);
+  for (int c = 0; c < channels; ++c) {
+    levels.peak[c].store(peak[c], std::memory_order_relaxed);
+  }
+}
+
+// --- AudioMonitor ---
+
+AudioMonitor::AudioMonitor() = default;
+
+AudioMonitor::~AudioMonitor() { stop(); }
+
+bool AudioMonitor::start(int device_index, int num_channels, int sample_rate) {
+  if (_stream) return true;
+
+  PaError err = Pa_Initialize();
+  if (err != paNoError) return false;
+  _pa_initialized = true;
+
+  const PaDeviceInfo* info = Pa_GetDeviceInfo(device_index);
+  if (!info) {
+    Pa_Terminate();
+    _pa_initialized = false;
+    return false;
+  }
+
+  _channels = num_channels;
+  levels.channels.store(num_channels, std::memory_order_relaxed);
+
+  PaStreamParameters params{};
+  params.device = device_index;
+  params.channelCount = num_channels;
+  params.sampleFormat = paInt32;
+  params.suggestedLatency = info->defaultHighInputLatency;
+  params.hostApiSpecificStreamInfo = nullptr;
+
+  err = Pa_OpenStream(&_stream, &params, nullptr, sample_rate, paFramesPerBufferUnspecified,
+                      paNoFlag, reinterpret_cast<PaStreamCallback*>(monitor_callback), this);
+  if (err != paNoError) {
+    Pa_Terminate();
+    _pa_initialized = false;
+    _stream = nullptr;
+    return false;
+  }
+
+  Pa_StartStream(_stream);
+  return true;
+}
+
+void AudioMonitor::stop() {
+  if (_stream) {
+    Pa_StopStream(_stream);
+    Pa_CloseStream(_stream);
+    _stream = nullptr;
+  }
+  if (_pa_initialized) {
+    Pa_Terminate();
+    _pa_initialized = false;
+  }
+  for (int c = 0; c < MAX_CHANNELS; ++c) {
+    levels.peak[c].store(0.0f, std::memory_order_relaxed);
+  }
+}
+
+int AudioMonitor::monitor_callback(const void* input, void* /*output*/, unsigned long frame_count,
+                                    const void* /*time_info*/, unsigned long /*flags*/,
+                                    void* user_data) {
+  auto* self = static_cast<AudioMonitor*>(user_data);
+  compute_peaks(static_cast<const int32_t*>(input), frame_count, self->_channels, self->levels);
+  return paContinue;
+}
+
+// --- Recorder ---
+
 std::string Recorder::make_split_filename(const std::string& base, int index) {
   std::string stem = base;
   std::string ext = ".flac";
@@ -85,7 +168,7 @@ bool Recorder::open() {
   size_t ring_capacity = _config.sample_rate * _config.channels * 2;
   _ring = std::make_unique<SpscRingBuffer<int32_t>>(ring_capacity);
 
-  _cb_ctx = {_ring.get(), &_overruns, _config.channels, shift};
+  _cb_ctx = {_ring.get(), &_overruns, &_levels, _config.channels, shift};
 
   PaStreamParameters params{};
   params.device = _device_index;
@@ -213,6 +296,8 @@ int Recorder::pa_callback(const void* input, void* /*output*/, unsigned long fra
       remaining -= chunk;
     }
   }
+
+  compute_peaks(in, frame_count, ctx->channels, *ctx->levels);
 
   return paContinue;
 }
