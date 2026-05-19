@@ -477,8 +477,9 @@ int run_gui(const Config& config) {
     if (meter_height < 20) meter_height = 20;
 
     float spacing = meter_channels > 16 ? 2.0f : 4.0f;
-    float bar_width = meter_channels > 0
-        ? (meter_avail_w - spacing * (meter_channels - 1)) / meter_channels
+    int layout_channels = std::max(meter_channels, 16);
+    float bar_width = layout_channels > 0
+        ? (meter_avail_w - spacing * (layout_channels - 1)) / layout_channels
         : 0;
     if (bar_width < 4) bar_width = 4;
 
