@@ -12,9 +12,9 @@ namespace recorder {
 static std::string default_output_path() {
   std::string usb = find_usb_disk();
   if (!usb.empty()) {
-    return usb + "/recording.flac";
+    return usb + "/recording.wav";
   }
-  return "recording.flac";
+  return "recording.wav";
 }
 
 static void print_usage(const char* prog) {
@@ -27,7 +27,7 @@ static void print_usage(const char* prog) {
       << "  -c, --channels <n>         Number of channels, 1-32 (default: device max)\n"
       << "  -r, --rate <hz>            Sample rate in Hz (default: 48000)\n"
       << "  -b, --bits <n>             Bit depth: 16 or 24 (default: 24)\n"
-      << "  -o, --output <file>        Output FLAC filename (default: <usb disk>/recording.flac)\n"
+      << "  -o, --output <file>        Output filename, .wav or .flac (default: <usb disk>/recording.wav)\n"
       << "  -t, --duration <seconds>   Recording duration, 0 = until Ctrl+C (default: 0)\n"
       << "  -s, --split <minutes>      Split into new file every N minutes, 0 = no split (default: 30)\n"
       << "  -g, --gui                  Launch with graphical interface\n"

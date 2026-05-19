@@ -13,7 +13,7 @@
 
 #include <filesystem>
 
-#include "flac_writer.h"
+#include "audio_writer.h"
 #include "ring_buffer.h"
 
 namespace recorder {
@@ -323,7 +323,7 @@ static constexpr uint64_t max_file_bytes = 3900000000ULL;
 struct ChannelGroup {
   int first_ch;
   int group_channels;
-  std::unique_ptr<FlacWriter> writer;
+  std::unique_ptr<AudioWriter> writer;
   std::vector<int32_t> deinterleave_buf;
   std::string filename;
 };
@@ -358,8 +358,8 @@ void Recorder::writer_thread_func() {
         cg.filename = base;
       }
 
-      cg.writer = std::make_unique<FlacWriter>(cg.filename, cg.group_channels,
-                                                _config.sample_rate, _config.bit_depth);
+      cg.writer = create_writer(cg.filename, cg.group_channels,
+                               _config.sample_rate, _config.bit_depth);
       if (!cg.writer->init()) {
         _writer_error.store(true, std::memory_order_relaxed);
         return false;

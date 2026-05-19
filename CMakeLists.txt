@@ -133,7 +133,9 @@ set(RECORDER_SOURCES
     src/main.cpp
     src/cli.cpp
     src/device_list.cpp
+    src/audio_writer.cpp
     src/flac_writer.cpp
+    src/wav_writer.cpp
     src/recorder.cpp
 )
 

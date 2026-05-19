@@ -2,20 +2,19 @@
 
 #include "audio_writer.h"
 
-#include <FLAC/stream_encoder.h>
-
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace recorder {
 
-class FlacWriter : public AudioWriter {
+class WavWriter : public AudioWriter {
  public:
-  FlacWriter(const std::string& filename, int channels, int sample_rate, int bits_per_sample);
-  ~FlacWriter() override;
+  WavWriter(const std::string& filename, int channels, int sample_rate, int bits_per_sample);
+  ~WavWriter() override;
 
-  FlacWriter(const FlacWriter&) = delete;
-  FlacWriter& operator=(const FlacWriter&) = delete;
+  WavWriter(const WavWriter&) = delete;
+  WavWriter& operator=(const WavWriter&) = delete;
 
   bool init() override;
   bool write_samples(const int32_t* interleaved, size_t num_frames) override;
@@ -27,9 +26,14 @@ class FlacWriter : public AudioWriter {
   int _channels;
   int _sample_rate;
   int _bits_per_sample;
-  FLAC__StreamEncoder* _encoder = nullptr;
+  int _bytes_per_sample;
+  FILE* _file = nullptr;
   uint64_t _total_frames = 0;
+  uint32_t _data_bytes = 0;
   bool _finalized = false;
+
+  void write_header();
+  void patch_header();
 };
 
 }  // namespace recorder
