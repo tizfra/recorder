@@ -58,7 +58,18 @@ int run_gui(const Config& config) {
 #endif
 
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+#ifdef __linux__
+  GLFWmonitor* primary = glfwGetPrimaryMonitor();
+  const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
+  GLFWwindow* window = nullptr;
+  if (mode) {
+    window = glfwCreateWindow(mode->width, mode->height, "Audio Recorder", primary, nullptr);
+  } else {
+    window = glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
+  }
+#else
   GLFWwindow* window = glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
+#endif
   if (!window) {
     std::fprintf(stderr, "Error: failed to create window\n");
     glfwTerminate();
