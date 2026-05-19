@@ -434,10 +434,13 @@ int run_gui(const Config& config) {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.5f, 0.6f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.3f, 0.4f, 1.0f));
     if (ImGui::Button("Eject", ImVec2(130, btn_h))) {
-      std::string cmd = "umount " + current_usb_disk + " 2>&1";
+      // sync to flush writes, then unmount via udisksctl for clean desktop notification
+      std::system("sync");
+      std::string cmd = "udisksctl unmount -b $(findmnt -n -o SOURCE " + current_usb_disk +
+                         ") 2>&1 || umount " + current_usb_disk + " 2>&1";
       FILE* p = popen(cmd.c_str(), "r");
       if (p) {
-        char result[256] = {};
+        char result[512] = {};
         fgets(result, sizeof(result), p);
         int ret = pclose(p);
         if (ret == 0) {
