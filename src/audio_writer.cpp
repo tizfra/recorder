@@ -15,6 +15,12 @@ static bool ends_with(const std::string& s, const std::string& suffix) {
   });
 }
 
+static bool is_flac(const std::string& filename) { return ends_with(filename, ".flac"); }
+
+int max_channels_for_format(const std::string& filename) {
+  return is_flac(filename) ? 8 : 65535;
+}
+
 std::unique_ptr<AudioWriter> create_writer(const std::string& filename, int channels,
                                             int sample_rate, int bits_per_sample) {
   if (ends_with(filename, ".flac")) {

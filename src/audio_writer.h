@@ -15,6 +15,8 @@ class AudioWriter {
   virtual uint64_t total_frames() const = 0;
 };
 
+int max_channels_for_format(const std::string& filename);
+
 std::unique_ptr<AudioWriter> create_writer(const std::string& filename, int channels,
                                             int sample_rate, int bits_per_sample);
 

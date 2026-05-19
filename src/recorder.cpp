@@ -129,7 +129,6 @@ static std::string make_channel_group_filename(const std::string& base, int firs
   return stem + buf + ext;
 }
 
-static constexpr int MAX_FLAC_CHANNELS = 8;
 
 Recorder::Recorder(const Config& config) : _config(config) {}
 
@@ -176,12 +175,9 @@ bool Recorder::open() {
     return false;
   }
 
-  if (_config.channels > 8) {
-    bool flac = _config.output_file.size() >= 5 &&
-                _config.output_file.substr(_config.output_file.size() - 5) == ".flac";
-    if (flac) {
-      std::cerr << "Recording " << _config.channels << " channels in groups of 8 (FLAC limit)\n";
-    }
+  int max_ch = max_channels_for_format(_config.output_file);
+  if (_config.channels > max_ch) {
+    std::cerr << "Recording " << _config.channels << " channels in groups of " << max_ch << "\n";
   }
 
   int shift = 32 - _config.bit_depth;
@@ -334,11 +330,8 @@ struct ChannelGroup {
 
 void Recorder::writer_thread_func() {
   const int channels = _config.channels;
-  bool is_flac = _config.output_file.size() >= 5 &&
-                 _config.output_file.substr(_config.output_file.size() - 5) == ".flac";
-  const int num_groups = (is_flac && channels > MAX_FLAC_CHANNELS)
-                             ? (channels + MAX_FLAC_CHANNELS - 1) / MAX_FLAC_CHANNELS
-                             : 1;
+  const int max_ch = max_channels_for_format(_config.output_file);
+  const int num_groups = (channels > max_ch) ? (channels + max_ch - 1) / max_ch : 1;
   const bool multi_group = num_groups > 1;
   const size_t batch_samples = 4096 * channels;
   std::vector<int32_t> buf(batch_samples);
@@ -352,7 +345,7 @@ void Recorder::writer_thread_func() {
   bool use_splits = frames_per_split > 0;
   std::vector<ChannelGroup> groups;
 
-  const int channels_per_group = multi_group ? MAX_FLAC_CHANNELS : channels;
+  const int channels_per_group = multi_group ? max_ch : channels;
 
   auto make_group_writers = [&](const std::string& base) -> bool {
     groups.clear();
