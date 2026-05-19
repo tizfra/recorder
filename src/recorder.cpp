@@ -20,16 +20,17 @@ namespace recorder {
 
 static void compute_peaks(const int32_t* input, unsigned long frames, int channels,
                            LevelData& levels) {
-  float peak[MAX_CHANNELS] = {};
+  int32_t peak[MAX_CHANNELS] = {};
   for (unsigned long i = 0; i < frames; ++i) {
     for (int c = 0; c < channels; ++c) {
-      float v = std::abs(input[i * channels + c]) / 2147483648.0f;
+      int32_t v = std::abs(input[i * channels + c]);
       if (v > peak[c]) peak[c] = v;
     }
   }
+  constexpr float scale = 1.0f / 2147483648.0f;
   levels.channels.store(channels, std::memory_order_relaxed);
   for (int c = 0; c < channels; ++c) {
-    levels.peak[c].store(peak[c], std::memory_order_relaxed);
+    levels.peak[c].store(peak[c] * scale, std::memory_order_relaxed);
   }
 }
 
@@ -63,7 +64,7 @@ bool AudioMonitor::start(int device_index, int num_channels, int sample_rate) {
   params.suggestedLatency = info->defaultHighInputLatency;
   params.hostApiSpecificStreamInfo = nullptr;
 
-  err = Pa_OpenStream(&_stream, &params, nullptr, sample_rate, paFramesPerBufferUnspecified,
+  err = Pa_OpenStream(&_stream, &params, nullptr, sample_rate, 4096,
                       paNoFlag, reinterpret_cast<PaStreamCallback*>(monitor_callback), this);
   if (err != paNoError) {
     Pa_Terminate();
