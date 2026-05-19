@@ -1,16 +1,18 @@
 # recorder
 
-Multi-channel USB audio recorder. Records from USB audio interfaces via PortAudio and encodes to FLAC. Includes a GUI mode with record/pause/stop controls.
+Multi-channel USB audio recorder. Records from USB audio interfaces via PortAudio and encodes to FLAC. Includes a GUI with record/pause/stop controls and per-channel VU meters.
 
 ## Features
 
 - Records multi-channel audio (1-32 channels) from USB audio interfaces
 - FLAC encoding (16 or 24-bit, up to 192kHz)
 - Time-based file splitting (default: 30 minutes)
-- GUI mode with ImGui (record/pause/stop, live elapsed time, overrun count)
-- Auto-detects USB audio interfaces (prefers `hw:` devices on Linux)
-- Auto-detects mounted USB disks for output
+- File size cap at 3.9GB (safe for FAT32 USB drives)
 - Never overwrites existing files (auto-increments filenames)
+- GUI with record/pause/stop buttons and vertical per-channel VU meters
+- Live level metering before recording starts
+- Auto-detects USB audio interfaces (prefers `hw:` devices on Linux)
+- Auto-detects mounted USB disks for output path
 - Hot-plugging: GUI detects USB audio devices and disks inserted/removed while idle
 
 ## Building
@@ -81,6 +83,37 @@ recorder --gui -s 10
 recorder
 ```
 
+## Autostart on Raspberry Pi
+
+### 1. Enable desktop autologin
+
+```bash
+sudo raspi-config
+```
+
+Go to **System Options** > **Boot / Auto Login** > **Desktop Autologin**.
+
+### 2. Install xdpyinfo (if not already present)
+
+```bash
+sudo apt install x11-utils
+```
+
+### 3. Create autostart entry
+
+```bash
+mkdir -p ~/.config/autostart
+
+cat > ~/.config/autostart/recorder.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Audio Recorder
+Exec=/home/br/src/recorder/start.sh
+EOF
+```
+
+The included `start.sh` waits for the X server to be ready before launching the GUI, so the window appears reliably on every boot.
+
 ## Architecture
 
 ```
@@ -88,3 +121,5 @@ USB Interface -> PortAudio (paInt32) -> RT Callback -> SPSC Ring Buffer -> Write
 ```
 
 The PortAudio callback runs on a real-time thread and writes to a lock-free single-producer single-consumer ring buffer. A separate writer thread reads from the buffer and encodes to FLAC. This keeps the real-time path free of allocations, locks, and I/O.
+
+The GUI renders at ~20fps using ImGui + GLFW + OpenGL to keep CPU usage low on the Pi. An AudioMonitor provides live VU metering when not recording; during recording, levels come from the main PortAudio callback. Files are capped at 3.9GB and automatically split to stay within FAT32 limits.
