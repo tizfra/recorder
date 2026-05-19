@@ -40,46 +40,54 @@ int run_gui(const Config& config) {
   std::signal(SIGINT, gui_signal_handler);
   std::signal(SIGTERM, gui_signal_handler);
 
-  GLFWwindow* window = nullptr;
-  for (int attempt = 0; attempt < 30; ++attempt) {
-    if (glfwInit()) {
-#ifdef __APPLE__
-      glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-      glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-      glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-      glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#else
-      glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-      glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-#endif
-      glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-#ifdef __linux__
-      GLFWmonitor* primary = glfwGetPrimaryMonitor();
-      const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
-      if (mode) {
-        window = glfwCreateWindow(mode->width, mode->height, "Audio Recorder", primary, nullptr);
-      } else {
-        window = glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
-      }
-#else
-      window = glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
-#endif
-      if (window) break;
-      glfwTerminate();
-    }
-    std::fprintf(stderr, "Waiting for display... (%d/30)\n", attempt + 1);
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+  if (!glfwInit()) {
+    std::fprintf(stderr, "Error: GLFW init failed\n");
+    return 1;
   }
+
+#ifdef __APPLE__
+  const char* glsl_version = "#version 150";
+  auto set_gl_hints = []() {
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+  };
+  auto create_window = [&]() {
+    set_gl_hints();
+    return glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
+  };
+#else
+  const char* glsl_version = "#version 130";
+  auto create_window = [&]() {
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    GLFWmonitor* primary = glfwGetPrimaryMonitor();
+    const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
+    if (mode) {
+      return glfwCreateWindow(mode->width, mode->height, "Audio Recorder", primary, nullptr);
+    }
+    return glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
+  };
+#endif
+
+  // On some systems (Pi), the first window after boot doesn't render.
+  // Create and destroy a throwaway window to prime the GPU/compositor.
+  GLFWwindow* warmup = create_window();
+  if (warmup) {
+    glfwMakeContextCurrent(warmup);
+    glfwSwapBuffers(warmup);
+    glfwDestroyWindow(warmup);
+  }
+
+  GLFWwindow* window = create_window();
   if (!window) {
-    std::fprintf(stderr, "Error: failed to create window after 30 attempts\n");
+    std::fprintf(stderr, "Error: failed to create window\n");
     glfwTerminate();
     return 1;
   }
-#ifdef __APPLE__
-  const char* glsl_version = "#version 150";
-#else
-  const char* glsl_version = "#version 130";
-#endif
   glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
 
