@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 
+#include "audio_writer.h"
 #include "device_list.h"
 #include "recorder.h"
 
@@ -334,8 +335,11 @@ int run_gui(const Config& config) {
       ImGui::Text("%s", rec->current_file().c_str());
     } else {
       if (!selected_device_name.empty()) {
+        int display_bits = format_needs_bit_shift(active_config.output_file)
+                               ? active_config.bit_depth
+                               : 32;
         ImGui::Text("%s  %s  %dch / %dHz / %dbit", status_text, selected_device_name.c_str(),
-                    active_config.channels, active_config.sample_rate, active_config.bit_depth);
+                    active_config.channels, active_config.sample_rate, display_bits);
         ImGui::Text("%s", active_config.output_file.c_str());
       } else {
         ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
