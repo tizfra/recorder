@@ -249,55 +249,13 @@ int run_gui(const Config& config) {
 
     ImGui::Begin("##main", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoScrollbar);
 
     Recorder::State state =
         rec ? rec->state() : Recorder::State::Idle;
 
-    float total_width = ImGui::GetContentRegionAvail().x;
-    float total_height = ImGui::GetContentRegionAvail().y;
-    float meter_panel_width = total_width * 0.35f;
-    float controls_width = total_width - meter_panel_width - 8;
-
-    ImGui::BeginChild("##controls", ImVec2(controls_width, total_height), false);
-
-    // --- Header ---
-    ImGui::TextUnformatted("Audio Recorder");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // --- Device info ---
-    if (!selected_device_name.empty()) {
-      ImGui::Text("Device: %s", selected_device_name.c_str());
-    } else {
-      ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
-    }
-    ImGui::Text("Config: %dch, %dHz, %dbit", active_config.channels, active_config.sample_rate,
-                active_config.bit_depth);
-    ImGui::Text("Output: %s", active_config.output_file.c_str());
-
-    bool is_recording = state == Recorder::State::Recording || state == Recorder::State::Paused;
-    if (is_recording) {
-      if (active_config.split_seconds > 0) {
-        ImGui::Text("Split:  every %.0f min", split_minutes);
-      } else {
-        ImGui::Text("Split:  off");
-      }
-    } else {
-      ImGui::SetNextItemWidth(120);
-      if (ImGui::InputFloat("Split (min)", &split_minutes, 1.0f, 5.0f, "%.0f")) {
-        if (split_minutes < 0) split_minutes = 0;
-        active_config.split_seconds = split_minutes * 60.0;
-      }
-      ImGui::SameLine();
-      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "0 = no split");
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // --- Status ---
+    // --- Status dot + text ---
     ImVec4 status_color;
     const char* status_text;
     switch (state) {
@@ -320,73 +278,52 @@ int run_gui(const Config& config) {
     }
 
     float radius = 6.0f;
-    ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImVec2 dot_pos = ImGui::GetCursorScreenPos();
     ImGui::GetWindowDrawList()->AddCircleFilled(
-        ImVec2(cursor.x + radius, cursor.y + ImGui::GetTextLineHeight() * 0.5f), radius,
+        ImVec2(dot_pos.x + radius, dot_pos.y + ImGui::GetTextLineHeight() * 0.5f), radius,
         ImGui::ColorConvertFloat4ToU32(status_color));
     ImGui::Dummy(ImVec2(radius * 2 + 4, 0));
     ImGui::SameLine();
-    ImGui::Text("%s", status_text);
 
-    // --- Time and stats ---
-    bool show_stats = rec && state != Recorder::State::Idle;
-    if (show_stats) {
+    // Compact info line
+    if (rec && state != Recorder::State::Idle) {
       char time_buf[32];
       format_time(rec->elapsed_seconds(), time_buf, sizeof(time_buf));
-      ImGui::Text("Time:   %s", time_buf);
-
       std::string cur_file = rec->current_file();
-      if (!cur_file.empty()) {
-        ImGui::Text("File:   %s", cur_file.c_str());
-      }
-
-      uint64_t frames = rec->total_frames();
-      ImGui::Text("Frames: %llu", static_cast<unsigned long long>(frames));
+      ImGui::Text("%s  %s  %s", status_text, time_buf, cur_file.c_str());
 
       uint64_t overruns = rec->overruns();
       if (overruns > 0) {
-        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Overruns: %llu",
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "  OVR:%llu",
                            static_cast<unsigned long long>(overruns));
       }
-
-      int fc = rec->files_written();
-      if (fc > 1) {
-        ImGui::Text("Files:  %d", fc);
-      }
-    } else if (state == Recorder::State::Idle && last_total_frames > 0) {
-      // Show summary from last recording
-      char time_buf[32];
-      format_time(last_elapsed, time_buf, sizeof(time_buf));
-      ImGui::Text("Last:   %s, %llu frames", time_buf,
-                  static_cast<unsigned long long>(last_total_frames));
-      if (last_files_written > 1) {
-        ImGui::SameLine();
-        ImGui::Text(" (%d files)", last_files_written);
+    } else {
+      if (!selected_device_name.empty()) {
+        ImGui::Text("%s  %s  %dch/%dHz/%dbit  %s", status_text, selected_device_name.c_str(),
+                    active_config.channels, active_config.sample_rate, active_config.bit_depth,
+                    active_config.output_file.c_str());
+      } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
       }
     }
 
     // --- Error ---
     if (!error_msg.empty()) {
-      ImGui::Spacing();
       ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", error_msg.c_str());
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
     // --- Buttons ---
     bool has_device = !selected_device_name.empty();
+    float btn_h = 40.0f;
 
-    // Record button
     bool can_record = has_device && (state == Recorder::State::Idle || state == Recorder::State::Stopped);
     if (!can_record) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
-    if (ImGui::Button("Record", ImVec2(120, 36))) {
+    if (ImGui::Button("Record", ImVec2(130, btn_h))) {
       error_msg.clear();
-      // Save stats from previous recording before resetting
       if (rec) {
         last_total_frames = rec->total_frames();
         last_overruns = rec->overruns();
@@ -414,14 +351,13 @@ int run_gui(const Config& config) {
 
     ImGui::SameLine();
 
-    // Pause / Resume button
     bool can_pause = state == Recorder::State::Recording || state == Recorder::State::Paused;
     if (!can_pause) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.6f, 0.1f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.5f, 0.05f, 1.0f));
     const char* pause_label = state == Recorder::State::Paused ? "Resume" : "Pause";
-    if (ImGui::Button(pause_label, ImVec2(120, 36))) {
+    if (ImGui::Button(pause_label, ImVec2(130, btn_h))) {
       if (state == Recorder::State::Paused) {
         rec->resume();
       } else {
@@ -433,13 +369,12 @@ int run_gui(const Config& config) {
 
     ImGui::SameLine();
 
-    // Stop button
     bool can_stop = state == Recorder::State::Recording || state == Recorder::State::Paused;
     if (!can_stop) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.25f, 0.25f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
-    if (ImGui::Button("Stop", ImVec2(120, 36))) {
+    if (ImGui::Button("Stop", ImVec2(130, btn_h))) {
       rec->stop();
       last_total_frames = rec->total_frames();
       last_overruns = rec->overruns();
@@ -455,12 +390,8 @@ int run_gui(const Config& config) {
     ImGui::PopStyleColor(3);
     if (!can_stop) ImGui::EndDisabled();
 
-    ImGui::EndChild();
-
-    ImGui::SameLine();
-
-    // --- VU Meters (vertical, right panel) ---
-    ImGui::BeginChild("##meters", ImVec2(meter_panel_width, total_height), true);
+    // --- VU Meters (vertical, full width below) ---
+    ImGui::Spacing();
 
     LevelData* lvl = nullptr;
     if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
@@ -472,12 +403,15 @@ int run_gui(const Config& config) {
     int meter_channels = lvl ? lvl->channels.load(std::memory_order_relaxed) : active_config.channels;
     if (meter_channels > MAX_CHANNELS) meter_channels = MAX_CHANNELS;
 
-    float meter_height = ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeightWithSpacing();
-    float spacing = 4.0f;
+    float meter_avail_w = ImGui::GetContentRegionAvail().x;
+    float meter_height = ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeightWithSpacing() - 4;
+    if (meter_height < 20) meter_height = 20;
+
+    float spacing = meter_channels > 16 ? 2.0f : 4.0f;
     float bar_width = meter_channels > 0
-        ? (ImGui::GetContentRegionAvail().x - spacing * (meter_channels - 1)) / meter_channels
+        ? (meter_avail_w - spacing * (meter_channels - 1)) / meter_channels
         : 0;
-    if (bar_width < 6) bar_width = 6;
+    if (bar_width < 4) bar_width = 4;
 
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -495,7 +429,6 @@ int run_gui(const Config& config) {
       float y_top = origin.y;
       float y_bottom = origin.y + meter_height;
 
-      // Background
       draw->AddRectFilled(ImVec2(x, y_top), ImVec2(x + bar_width, y_bottom),
                           IM_COL32(40, 40, 40, 255));
 
@@ -503,7 +436,6 @@ int run_gui(const Config& config) {
         float bar_h = meter_height * level;
         float bar_y = y_bottom - bar_h;
 
-        // Color: green → yellow → red
         ImU32 color;
         if (level < 0.5f) {
           color = IM_COL32(30, 180, 30, 255);
@@ -516,7 +448,6 @@ int run_gui(const Config& config) {
       }
     }
 
-    // Channel labels below bars
     float label_y = origin.y + meter_height + 2;
     for (int c = 0; c < meter_channels; ++c) {
       char label[8];
@@ -525,10 +456,6 @@ int run_gui(const Config& config) {
       float x = origin.x + c * (bar_width + spacing) + (bar_width - label_w) * 0.5f;
       draw->AddText(ImVec2(x, label_y), IM_COL32(200, 200, 200, 255), label);
     }
-
-    ImGui::Dummy(ImVec2(0, meter_height + ImGui::GetTextLineHeightWithSpacing()));
-
-    ImGui::EndChild();
 
     ImGui::End();
     ImGui::Render();
