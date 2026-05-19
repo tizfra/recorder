@@ -35,9 +35,12 @@ static void print_usage(const char* prog) {
       << "\n"
       << "Examples:\n"
       << "  " << prog << " --list-devices\n"
-      << "  " << prog << " -d 3 -c 8 -r 48000 -b 24 -o session.flac\n"
-      << "  " << prog << " -c 2 -t 60 -o one_minute.flac\n"
-      << "  " << prog << " -c 2 -s 30 -o session.flac   # splits into session_001.flac, session_002.flac, ...\n";
+      << "  " << prog << "                                    # record with all defaults (WAV, USB disk, 30min splits)\n"
+      << "  " << prog << " -d 3 -c 8 -o session.wav          # 8 channels from device 3\n"
+      << "  " << prog << " -c 2 -t 60 -o take.wav            # 2 channels, 60 seconds\n"
+      << "  " << prog << " -o session.flac                    # FLAC output (selected by extension)\n"
+      << "  " << prog << " --gui                              # GUI mode\n"
+      << "  " << prog << " --gui -s 10                        # GUI with 10-minute splits\n";
 }
 
 std::optional<Config> parse_args(int argc, char* argv[]) {
