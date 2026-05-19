@@ -100,18 +100,18 @@ static bool write_through_ring_buffer(const std::string& filename, int channels,
 
 // --- WAV tests ---
 
-static bool test_wav_mono_24bit() {
-  std::string path = test_path("wav_mono_24.wav");
-  int channels = 1, rate = 48000, bits = 24;
+static bool test_wav_mono() {
+  std::string path = test_path("wav_mono.wav");
+  int channels = 1, rate = 48000;
   size_t frames = 4800;
   auto input = generate_samples(channels, frames);
 
-  CHECK(write_through_ring_buffer(path, channels, rate, bits, input), "write failed");
+  CHECK(write_through_ring_buffer(path, channels, rate, 32, input), "write failed");
 
   auto wav = read_wav(path);
   CHECK(wav.channels == channels, "wrong channel count");
   CHECK(wav.sample_rate == rate, "wrong sample rate");
-  CHECK(wav.bits_per_sample == bits, "wrong bit depth");
+  CHECK(wav.bits_per_sample == 32, "wrong bit depth");
   CHECK(wav.num_frames() == frames, "wrong frame count");
 
   for (size_t i = 0; i < input.size(); ++i) {
@@ -120,13 +120,13 @@ static bool test_wav_mono_24bit() {
   return true;
 }
 
-static bool test_wav_stereo_24bit() {
-  std::string path = test_path("wav_stereo_24.wav");
-  int channels = 2, rate = 48000, bits = 24;
+static bool test_wav_stereo() {
+  std::string path = test_path("wav_stereo.wav");
+  int channels = 2, rate = 48000;
   size_t frames = 4800;
   auto input = generate_samples(channels, frames);
 
-  CHECK(write_through_ring_buffer(path, channels, rate, bits, input), "write failed");
+  CHECK(write_through_ring_buffer(path, channels, rate, 32, input), "write failed");
 
   auto wav = read_wav(path);
   CHECK(wav.channels == channels, "wrong channel count");
@@ -139,13 +139,13 @@ static bool test_wav_stereo_24bit() {
   return true;
 }
 
-static bool test_wav_16ch_24bit() {
-  std::string path = test_path("wav_16ch_24.wav");
-  int channels = 16, rate = 48000, bits = 24;
+static bool test_wav_16ch() {
+  std::string path = test_path("wav_16ch.wav");
+  int channels = 16, rate = 48000;
   size_t frames = 4800;
   auto input = generate_samples(channels, frames);
 
-  CHECK(write_through_ring_buffer(path, channels, rate, bits, input), "write failed");
+  CHECK(write_through_ring_buffer(path, channels, rate, 32, input), "write failed");
 
   auto wav = read_wav(path);
   CHECK(wav.channels == channels, "wrong channel count");
@@ -153,34 +153,6 @@ static bool test_wav_16ch_24bit() {
 
   for (size_t i = 0; i < input.size(); ++i) {
     CHECK(wav.samples[i] == input[i], "sample mismatch");
-  }
-  return true;
-}
-
-static bool test_wav_stereo_16bit() {
-  std::string path = test_path("wav_stereo_16.wav");
-  int channels = 2, rate = 48000, bits = 16;
-  size_t frames = 4800;
-
-  // 16-bit samples must fit in int16 range
-  std::vector<int32_t> input(channels * frames);
-  for (size_t f = 0; f < frames; ++f) {
-    for (int c = 0; c < channels; ++c) {
-      input[f * channels + c] = static_cast<int16_t>((f % 65536) - 32768);
-    }
-  }
-
-  CHECK(write_through_pipeline(path, channels, rate, bits, input), "write failed");
-
-  auto wav = read_wav(path);
-  CHECK(wav.channels == channels, "wrong channel count");
-  CHECK(wav.bits_per_sample == bits, "wrong bit depth");
-  CHECK(wav.num_frames() == frames, "wrong frame count");
-
-  for (size_t i = 0; i < input.size(); ++i) {
-    int16_t expected = static_cast<int16_t>(input[i]);
-    int16_t got = static_cast<int16_t>(wav.samples[i]);
-    CHECK(got == expected, "sample mismatch");
   }
   return true;
 }
@@ -282,7 +254,7 @@ static bool test_flac_16ch_grouped() {
 static bool test_wav_time_split() {
   // At 48kHz, 4800 frames = 0.1s. With split at 0.05s (2400 frames), expect 2 files.
   std::string base = test_path("split_test.wav");
-  int channels = 2, rate = 48000, bits = 24;
+  int channels = 2, rate = 48000;
   size_t frames = 4800;
   auto input = generate_samples(channels, frames);
 
@@ -291,12 +263,12 @@ static bool test_wav_time_split() {
   // Write first split
   std::string path1 = test_path("split_test_001.wav");
   std::vector<int32_t> part1(input.begin(), input.begin() + frames_per_split * channels);
-  CHECK(write_through_pipeline(path1, channels, rate, bits, part1), "write split 1 failed");
+  CHECK(write_through_pipeline(path1, channels, rate, 32, part1), "write split 1 failed");
 
   // Write second split
   std::string path2 = test_path("split_test_002.wav");
   std::vector<int32_t> part2(input.begin() + frames_per_split * channels, input.end());
-  CHECK(write_through_pipeline(path2, channels, rate, bits, part2), "write split 2 failed");
+  CHECK(write_through_pipeline(path2, channels, rate, 32, part2), "write split 2 failed");
 
   auto wav1 = read_wav(path1);
   auto wav2 = read_wav(path2);
@@ -400,10 +372,9 @@ int main() {
   RUN_TEST(test_ring_buffer);
   RUN_TEST(test_max_channels_for_format);
   RUN_TEST(test_unique_filename);
-  RUN_TEST(test_wav_mono_24bit);
-  RUN_TEST(test_wav_stereo_24bit);
-  RUN_TEST(test_wav_16ch_24bit);
-  RUN_TEST(test_wav_stereo_16bit);
+  RUN_TEST(test_wav_mono);
+  RUN_TEST(test_wav_stereo);
+  RUN_TEST(test_wav_16ch);
   RUN_TEST(test_flac_mono_24bit);
   RUN_TEST(test_flac_stereo_24bit);
   RUN_TEST(test_flac_16ch_grouped);

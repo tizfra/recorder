@@ -180,7 +180,7 @@ bool Recorder::open() {
     std::cerr << "Recording " << _config.channels << " channels in groups of " << max_ch << "\n";
   }
 
-  int shift = 32 - _config.bit_depth;
+  int shift = format_needs_bit_shift(_config.output_file) ? 32 - _config.bit_depth : 0;
   size_t ring_capacity = _config.sample_rate * _config.channels * 2;
   _ring = std::make_unique<SpscRingBuffer<int32_t>>(ring_capacity);
 

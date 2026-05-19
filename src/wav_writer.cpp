@@ -10,8 +10,8 @@ WavWriter::WavWriter(const std::string& filename, int channels, int sample_rate,
     : _filename(filename),
       _channels(channels),
       _sample_rate(sample_rate),
-      _bits_per_sample(bits_per_sample),
-      _bytes_per_sample(bits_per_sample / 8) {}
+      _bits_per_sample(32),
+      _bytes_per_sample(4) {}
 
 WavWriter::~WavWriter() {
   finalize();
@@ -32,23 +32,10 @@ bool WavWriter::write_samples(const int32_t* interleaved, size_t num_frames) {
   if (!_file || _finalized) return false;
 
   size_t total_samples = num_frames * _channels;
+  size_t written = std::fwrite(interleaved, sizeof(int32_t), total_samples, _file);
+  if (written != total_samples) return false;
 
-  if (_bytes_per_sample == 3) {
-    for (size_t i = 0; i < total_samples; ++i) {
-      int32_t s = interleaved[i];
-      uint8_t bytes[3] = {static_cast<uint8_t>(s), static_cast<uint8_t>(s >> 8),
-                          static_cast<uint8_t>(s >> 16)};
-      if (std::fwrite(bytes, 1, 3, _file) != 3) return false;
-    }
-  } else {
-    for (size_t i = 0; i < total_samples; ++i) {
-      int16_t s = static_cast<int16_t>(interleaved[i]);
-      if (std::fwrite(&s, sizeof(int16_t), 1, _file) != 1) return false;
-    }
-  }
-
-  uint32_t bytes_written = static_cast<uint32_t>(total_samples * _bytes_per_sample);
-  _data_bytes += bytes_written;
+  _data_bytes += static_cast<uint32_t>(total_samples * 4);
   _total_frames += num_frames;
   return true;
 }

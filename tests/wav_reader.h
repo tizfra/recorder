@@ -54,7 +54,9 @@ inline WavData read_wav(const std::string& path) {
       size_t total_samples = chunk_size / bps;
       wav.samples.resize(total_samples);
 
-      if (bps == 3) {
+      if (bps == 4) {
+        std::fread(wav.samples.data(), sizeof(int32_t), total_samples, f);
+      } else if (bps == 3) {
         for (size_t i = 0; i < total_samples; ++i) {
           uint8_t b[3];
           std::fread(b, 1, 3, f);

@@ -16,6 +16,7 @@ class AudioWriter {
 };
 
 int max_channels_for_format(const std::string& filename);
+bool format_needs_bit_shift(const std::string& filename);
 
 std::unique_ptr<AudioWriter> create_writer(const std::string& filename, int channels,
                                             int sample_rate, int bits_per_sample);
