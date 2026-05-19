@@ -352,55 +352,55 @@ int run_gui(const Config& config) {
     bool is_recording = state == Recorder::State::Recording || state == Recorder::State::Paused;
     float btn_h = 40.0f;
 
-    bool can_record = has_device && (state == Recorder::State::Idle || state == Recorder::State::Stopped);
-    if (!can_record) ImGui::BeginDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
-    if (ImGui::Button("Record", ImVec2(130, btn_h))) {
-      error_msg.clear();
-      if (rec) {
-        last_total_frames = rec->total_frames();
-        last_overruns = rec->overruns();
-        last_files_written = rec->files_written();
-        last_elapsed = rec->elapsed_seconds();
-      }
-      std::string base = current_usb_disk.empty()
-                             ? output_basename
-                             : current_usb_disk + "/" + output_basename;
-      active_config.output_file = unique_filename(base);
-      monitor.stop();
-      rec = std::make_unique<Recorder>(active_config);
-      if (!rec->open()) {
-        error_msg = "Failed to open audio device.";
-        rec.reset();
-        monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
-      } else if (!rec->start()) {
-        error_msg = "Failed to start recording.";
-        rec.reset();
-        monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
-      }
-    }
-    ImGui::PopStyleColor(3);
-    if (!can_record) ImGui::EndDisabled();
-
-    ImGui::SameLine();
-
-    bool can_pause = state == Recorder::State::Recording || state == Recorder::State::Paused;
-    if (!can_pause) ImGui::BeginDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.6f, 0.1f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.5f, 0.05f, 1.0f));
-    const char* pause_label = state == Recorder::State::Paused ? "Resume" : "Pause";
-    if (ImGui::Button(pause_label, ImVec2(130, btn_h))) {
-      if (state == Recorder::State::Paused) {
-        rec->resume();
-      } else {
+    // Record / Pause combined button
+    if (state == Recorder::State::Recording) {
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.6f, 0.1f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.5f, 0.05f, 1.0f));
+      if (ImGui::Button("Pause", ImVec2(130, btn_h))) {
         rec->pause();
       }
+      ImGui::PopStyleColor(3);
+    } else if (state == Recorder::State::Paused) {
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
+      if (ImGui::Button("Resume", ImVec2(130, btn_h))) {
+        rec->resume();
+      }
+      ImGui::PopStyleColor(3);
+    } else {
+      if (!has_device) ImGui::BeginDisabled();
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
+      if (ImGui::Button("Record", ImVec2(130, btn_h))) {
+        error_msg.clear();
+        if (rec) {
+          last_total_frames = rec->total_frames();
+          last_overruns = rec->overruns();
+          last_files_written = rec->files_written();
+          last_elapsed = rec->elapsed_seconds();
+        }
+        std::string base = current_usb_disk.empty()
+                               ? output_basename
+                               : current_usb_disk + "/" + output_basename;
+        active_config.output_file = unique_filename(base);
+        monitor.stop();
+        rec = std::make_unique<Recorder>(active_config);
+        if (!rec->open()) {
+          error_msg = "Failed to open audio device.";
+          rec.reset();
+          monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+        } else if (!rec->start()) {
+          error_msg = "Failed to start recording.";
+          rec.reset();
+          monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+        }
+      }
+      ImGui::PopStyleColor(3);
+      if (!has_device) ImGui::EndDisabled();
     }
-    ImGui::PopStyleColor(3);
-    if (!can_pause) ImGui::EndDisabled();
 
     ImGui::SameLine();
 
