@@ -21,6 +21,7 @@ static bool is_builtin_or_virtual(const char* name) {
       "lavrate",    "samplerate", "speexrate",
       "speex",      "upmix",      "vdownmix",
       "usbstream",  "jack",       "oss",
+      "spdif",
   };
   for (auto* pattern : skip_patterns) {
     if (std::strstr(name, pattern)) return true;
