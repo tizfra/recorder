@@ -349,6 +349,7 @@ int run_gui(const Config& config) {
 
     // --- Buttons ---
     bool has_device = !selected_device_name.empty();
+    bool is_recording = state == Recorder::State::Recording || state == Recorder::State::Paused;
     float btn_h = 40.0f;
 
     bool can_record = has_device && (state == Recorder::State::Idle || state == Recorder::State::Stopped);
@@ -423,6 +424,33 @@ int run_gui(const Config& config) {
     }
     ImGui::PopStyleColor(3);
     if (!can_stop) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
+    // Eject button
+    bool can_eject = !current_usb_disk.empty() && !is_recording;
+    if (!can_eject) ImGui::BeginDisabled();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.5f, 0.6f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.3f, 0.4f, 1.0f));
+    if (ImGui::Button("Eject", ImVec2(130, btn_h))) {
+      std::string cmd = "umount " + current_usb_disk + " 2>&1";
+      FILE* p = popen(cmd.c_str(), "r");
+      if (p) {
+        char result[256] = {};
+        fgets(result, sizeof(result), p);
+        int ret = pclose(p);
+        if (ret == 0) {
+          std::fprintf(stderr, "Ejected: %s\n", current_usb_disk.c_str());
+          current_usb_disk.clear();
+          active_config.output_file = unique_filename(output_basename);
+        } else {
+          error_msg = "Eject failed: " + std::string(result);
+        }
+      }
+    }
+    ImGui::PopStyleColor(3);
+    if (!can_eject) ImGui::EndDisabled();
 
     // --- VU Meters (vertical, full width below) ---
     ImGui::Spacing();
