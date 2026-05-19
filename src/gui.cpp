@@ -285,24 +285,22 @@ int run_gui(const Config& config) {
     ImGui::Dummy(ImVec2(radius * 2 + 4, 0));
     ImGui::SameLine();
 
-    // Compact info line
     if (rec && state != Recorder::State::Idle) {
       char time_buf[32];
       format_time(rec->elapsed_seconds(), time_buf, sizeof(time_buf));
-      std::string cur_file = rec->current_file();
-      ImGui::Text("%s  %s  %s", status_text, time_buf, cur_file.c_str());
-
+      ImGui::Text("%s  %s", status_text, time_buf);
       uint64_t overruns = rec->overruns();
       if (overruns > 0) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "  OVR:%llu",
                            static_cast<unsigned long long>(overruns));
       }
+      ImGui::Text("%s", rec->current_file().c_str());
     } else {
       if (!selected_device_name.empty()) {
-        ImGui::Text("%s  %s  %dch/%dHz/%dbit  %s", status_text, selected_device_name.c_str(),
-                    active_config.channels, active_config.sample_rate, active_config.bit_depth,
-                    active_config.output_file.c_str());
+        ImGui::Text("%s  %s  %dch / %dHz / %dbit", status_text, selected_device_name.c_str(),
+                    active_config.channels, active_config.sample_rate, active_config.bit_depth);
+        ImGui::Text("%s", active_config.output_file.c_str());
       } else {
         ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
       }
