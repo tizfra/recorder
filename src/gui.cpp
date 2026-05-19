@@ -143,7 +143,7 @@ int run_gui(const Config& config) {
   double last_elapsed = 0.0;
 
   while (!glfwWindowShouldClose(window) && g_gui_running.load(std::memory_order_relaxed)) {
-    glfwPollEvents();
+    glfwWaitEventsTimeout(1.0 / 20.0);
 
     bool is_idle = !rec || rec->state() == Recorder::State::Idle ||
                    rec->state() == Recorder::State::Stopped;
