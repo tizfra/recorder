@@ -218,24 +218,47 @@ int run_gui(const Config& config) {
 
         known_devices = current_names;
 
-        // --- USB disk hot-detection ---
-        std::string usb_disk = find_usb_disk();
-        if (usb_disk != current_usb_disk) {
-          current_usb_disk = usb_disk;
-          if (!usb_disk.empty()) {
-            active_config.output_file = unique_filename(usb_disk + "/" + output_basename);
-            std::fprintf(stderr, "USB disk detected: %s → %s\n", usb_disk.c_str(),
-                         active_config.output_file.c_str());
-          } else {
-            active_config.output_file = unique_filename(output_basename);
-            std::fprintf(stderr, "USB disk removed, output: %s\n",
-                         active_config.output_file.c_str());
-          }
-        }
-
         // Restart monitor with current device
         if (active_config.device_index >= 0) {
           monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+        }
+      }
+    }
+
+    // --- USB disk hot-detection (runs always, not just when idle) ---
+    {
+      auto now = std::chrono::steady_clock::now();
+      static auto last_disk_scan = std::chrono::steady_clock::now();
+      double since_disk_scan = std::chrono::duration<double>(now - last_disk_scan).count();
+      if (since_disk_scan >= 2.0) {
+        last_disk_scan = now;
+        std::string usb_disk = find_usb_disk();
+        if (usb_disk != current_usb_disk) {
+          std::string old_disk = current_usb_disk;
+          current_usb_disk = usb_disk;
+
+          if (!usb_disk.empty()) {
+            if (!rec) {
+              active_config.output_file = unique_filename(usb_disk + "/" + output_basename);
+            }
+            std::fprintf(stderr, "USB disk detected: %s\n", usb_disk.c_str());
+          } else {
+            std::fprintf(stderr, "USB disk removed: %s\n", old_disk.c_str());
+            if (rec && (rec->state() == Recorder::State::Recording ||
+                        rec->state() == Recorder::State::Paused)) {
+              std::fprintf(stderr, "Disk removed during recording — stopping.\n");
+              rec->stop();
+              last_total_frames = rec->total_frames();
+              last_overruns = rec->overruns();
+              last_files_written = rec->files_written();
+              last_elapsed = rec->elapsed_seconds();
+              rec.reset();
+              monitor.start(active_config.device_index, active_config.channels,
+                            active_config.sample_rate);
+              error_msg = "USB disk removed. Recording stopped.";
+            }
+            active_config.output_file = unique_filename(output_basename);
+          }
         }
       }
     }
