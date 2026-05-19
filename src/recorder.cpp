@@ -217,7 +217,7 @@ int Recorder::pa_callback(const void* input, void* /*output*/, unsigned long fra
   return paContinue;
 }
 
-static constexpr uint64_t max_file_bytes = 4000000000ULL;
+static constexpr uint64_t max_file_bytes = 3900000000ULL;
 
 void Recorder::writer_thread_func() {
   const int channels = _config.channels;
@@ -311,19 +311,19 @@ void Recorder::writer_thread_func() {
       continue;
     }
 
+    // Size-based rotation: check before writing
+    std::error_code ec;
+    auto size = std::filesystem::file_size(filename, ec);
+    if (!ec && size >= max_file_bytes) {
+      if (!rotate()) return;
+    }
+
     if (!writer->write_samples(buf.data(), frames)) {
       _writer_error.store(true, std::memory_order_relaxed);
       return;
     }
     current_file_frames += frames;
     _total_frames.fetch_add(frames, std::memory_order_relaxed);
-
-    // Size-based rotation
-    std::error_code ec;
-    auto size = std::filesystem::file_size(filename, ec);
-    if (!ec && size >= max_file_bytes) {
-      if (!rotate()) return;
-    }
   }
 
   writer->finalize();
