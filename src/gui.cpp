@@ -143,6 +143,7 @@ int run_gui(const Config& config) {
       double since_scan = std::chrono::duration<double>(now - last_scan).count();
       if (since_scan >= scan_interval_secs) {
         last_scan = now;
+        monitor.stop();
         auto devices = scan_input_devices();
 
         // Check for newly appeared USB devices
@@ -206,6 +207,11 @@ int run_gui(const Config& config) {
             std::fprintf(stderr, "USB disk removed, output: %s\n",
                          active_config.output_file.c_str());
           }
+        }
+
+        // Restart monitor with current device
+        if (active_config.device_index >= 0) {
+          monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
         }
       }
     }
