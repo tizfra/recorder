@@ -58,7 +58,7 @@ int run_gui(const Config& config) {
 #endif
 
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-  GLFWwindow* window = glfwCreateWindow(480, 500, "Audio Recorder", nullptr, nullptr);
+  GLFWwindow* window = glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
   if (!window) {
     std::fprintf(stderr, "Error: failed to create window\n");
     glfwTerminate();
@@ -236,6 +236,13 @@ int run_gui(const Config& config) {
 
     Recorder::State state =
         rec ? rec->state() : Recorder::State::Idle;
+
+    float total_width = ImGui::GetContentRegionAvail().x;
+    float total_height = ImGui::GetContentRegionAvail().y;
+    float meter_panel_width = total_width * 0.35f;
+    float controls_width = total_width - meter_panel_width - 8;
+
+    ImGui::BeginChild("##controls", ImVec2(controls_width, total_height), false);
 
     // --- Header ---
     ImGui::TextUnformatted("Audio Recorder");
@@ -431,10 +438,12 @@ int run_gui(const Config& config) {
     ImGui::PopStyleColor(3);
     if (!can_stop) ImGui::EndDisabled();
 
-    // --- VU Meters ---
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // --- VU Meters (vertical, right panel) ---
+    ImGui::BeginChild("##meters", ImVec2(meter_panel_width, total_height), true);
 
     LevelData* lvl = nullptr;
     if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
@@ -444,11 +453,20 @@ int run_gui(const Config& config) {
     }
 
     int meter_channels = lvl ? lvl->channels.load(std::memory_order_relaxed) : active_config.channels;
-    float avail_width = ImGui::GetContentRegionAvail().x;
+    if (meter_channels > MAX_CHANNELS) meter_channels = MAX_CHANNELS;
+
+    float meter_height = ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeightWithSpacing();
+    float spacing = 4.0f;
+    float bar_width = meter_channels > 0
+        ? (ImGui::GetContentRegionAvail().x - spacing * (meter_channels - 1)) / meter_channels
+        : 0;
+    if (bar_width < 6) bar_width = 6;
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
 
     for (int c = 0; c < meter_channels; ++c) {
       float raw = lvl ? lvl->peak[c].load(std::memory_order_relaxed) : 0.0f;
-      // Smooth decay
       if (raw >= display_peak[c]) {
         display_peak[c] = raw;
       } else {
@@ -456,21 +474,18 @@ int run_gui(const Config& config) {
       }
       float level = display_peak[c];
 
-      char label[16];
-      std::snprintf(label, sizeof(label), "%d", c + 1);
-      ImGui::Text("%s", label);
-      ImGui::SameLine(30);
-
-      float bar_width = (avail_width - 35) * level;
-      ImVec2 pos = ImGui::GetCursorScreenPos();
-      float bar_height = ImGui::GetTextLineHeight();
-      ImDrawList* draw = ImGui::GetWindowDrawList();
+      float x = origin.x + c * (bar_width + spacing);
+      float y_top = origin.y;
+      float y_bottom = origin.y + meter_height;
 
       // Background
-      draw->AddRectFilled(pos, ImVec2(pos.x + avail_width - 35, pos.y + bar_height),
+      draw->AddRectFilled(ImVec2(x, y_top), ImVec2(x + bar_width, y_bottom),
                           IM_COL32(40, 40, 40, 255));
 
-      if (bar_width > 0) {
+      if (level > 0.001f) {
+        float bar_h = meter_height * level;
+        float bar_y = y_bottom - bar_h;
+
         // Color: green → yellow → red
         ImU32 color;
         if (level < 0.5f) {
@@ -480,11 +495,23 @@ int run_gui(const Config& config) {
         } else {
           color = IM_COL32(220, 40, 40, 255);
         }
-        draw->AddRectFilled(pos, ImVec2(pos.x + bar_width, pos.y + bar_height), color);
+        draw->AddRectFilled(ImVec2(x, bar_y), ImVec2(x + bar_width, y_bottom), color);
       }
-
-      ImGui::Dummy(ImVec2(avail_width - 35, bar_height));
     }
+
+    // Channel labels below bars
+    float label_y = origin.y + meter_height + 2;
+    for (int c = 0; c < meter_channels; ++c) {
+      char label[8];
+      std::snprintf(label, sizeof(label), "%d", c + 1);
+      float label_w = ImGui::CalcTextSize(label).x;
+      float x = origin.x + c * (bar_width + spacing) + (bar_width - label_w) * 0.5f;
+      draw->AddText(ImVec2(x, label_y), IM_COL32(200, 200, 200, 255), label);
+    }
+
+    ImGui::Dummy(ImVec2(0, meter_height + ImGui::GetTextLineHeightWithSpacing()));
+
+    ImGui::EndChild();
 
     ImGui::End();
     ImGui::Render();
