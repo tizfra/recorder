@@ -115,6 +115,22 @@ std::string Recorder::make_split_filename(const std::string& base, int index) {
   return stem + buf + ext;
 }
 
+static std::string make_channel_group_filename(const std::string& base, int first_ch,
+                                                int last_ch) {
+  std::string stem = base;
+  std::string ext = ".flac";
+  auto dot = base.rfind('.');
+  if (dot != std::string::npos) {
+    stem = base.substr(0, dot);
+    ext = base.substr(dot);
+  }
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "_ch%02d-%02d", first_ch, last_ch);
+  return stem + buf + ext;
+}
+
+static constexpr int MAX_FLAC_CHANNELS = 8;
+
 Recorder::Recorder(const Config& config) : _config(config) {}
 
 Recorder::~Recorder() {
@@ -161,8 +177,7 @@ bool Recorder::open() {
   }
 
   if (_config.channels > 8) {
-    std::cerr << "Warning: FLAC spec defines channel assignments up to 8. Files with "
-              << _config.channels << " channels may not play in all software.\n";
+    std::cerr << "Recording " << _config.channels << " channels in groups of 8\n";
   }
 
   int shift = 32 - _config.bit_depth;
@@ -305,8 +320,18 @@ int Recorder::pa_callback(const void* input, void* /*output*/, unsigned long fra
 
 static constexpr uint64_t max_file_bytes = 3900000000ULL;
 
+struct ChannelGroup {
+  int first_ch;
+  int group_channels;
+  std::unique_ptr<FlacWriter> writer;
+  std::vector<int32_t> deinterleave_buf;
+  std::string filename;
+};
+
 void Recorder::writer_thread_func() {
   const int channels = _config.channels;
+  const int num_groups = (channels + MAX_FLAC_CHANNELS - 1) / MAX_FLAC_CHANNELS;
+  const bool multi_group = num_groups > 1;
   const size_t batch_samples = 4096 * channels;
   std::vector<int32_t> buf(batch_samples);
 
@@ -317,43 +342,79 @@ void Recorder::writer_thread_func() {
 
   int file_index = 1;
   bool use_splits = frames_per_split > 0;
-  std::string filename =
+  std::vector<ChannelGroup> groups;
+
+  auto make_group_writers = [&](const std::string& base) -> bool {
+    groups.clear();
+    for (int g = 0; g < num_groups; ++g) {
+      ChannelGroup cg;
+      cg.first_ch = g * MAX_FLAC_CHANNELS;
+      cg.group_channels = std::min(MAX_FLAC_CHANNELS, channels - cg.first_ch);
+
+      if (multi_group) {
+        cg.filename = make_channel_group_filename(base, cg.first_ch + 1,
+                                                   cg.first_ch + cg.group_channels);
+      } else {
+        cg.filename = base;
+      }
+
+      cg.writer = std::make_unique<FlacWriter>(cg.filename, cg.group_channels,
+                                                _config.sample_rate, _config.bit_depth);
+      if (!cg.writer->init()) {
+        _writer_error.store(true, std::memory_order_relaxed);
+        return false;
+      }
+      cg.deinterleave_buf.resize(4096 * cg.group_channels);
+      std::cerr << "  → " << cg.filename << "\n";
+      groups.push_back(std::move(cg));
+    }
+    return true;
+  };
+
+  auto write_to_groups = [&](const int32_t* data, size_t frames) -> bool {
+    if (!multi_group) {
+      return groups[0].writer->write_samples(data, frames);
+    }
+    for (auto& cg : groups) {
+      for (size_t f = 0; f < frames; ++f) {
+        for (int c = 0; c < cg.group_channels; ++c) {
+          cg.deinterleave_buf[f * cg.group_channels + c] = data[f * channels + cg.first_ch + c];
+        }
+      }
+      if (!cg.writer->write_samples(cg.deinterleave_buf.data(), frames)) return false;
+    }
+    return true;
+  };
+
+  auto finalize_groups = [&]() {
+    for (auto& cg : groups) cg.writer->finalize();
+  };
+
+  std::string base_filename =
       use_splits ? make_split_filename(_config.output_file, file_index) : _config.output_file;
 
   {
     std::lock_guard<std::mutex> lock(_file_mutex);
-    _current_file = filename;
+    _current_file = base_filename;
   }
 
-  auto writer = std::make_unique<FlacWriter>(filename, channels, _config.sample_rate,
-                                             _config.bit_depth);
-  if (!writer->init()) {
-    _writer_error.store(true, std::memory_order_relaxed);
-    return;
-  }
-  std::cerr << "  → " << filename << "\n";
+  if (!make_group_writers(base_filename)) return;
 
   uint64_t current_file_frames = 0;
 
   auto rotate = [&]() -> bool {
-    writer->finalize();
+    finalize_groups();
     _file_count.store(file_index, std::memory_order_relaxed);
 
     ++file_index;
     use_splits = true;
-    filename = make_split_filename(_config.output_file, file_index);
+    base_filename = make_split_filename(_config.output_file, file_index);
     {
       std::lock_guard<std::mutex> lock(_file_mutex);
-      _current_file = filename;
+      _current_file = base_filename;
     }
 
-    writer =
-        std::make_unique<FlacWriter>(filename, channels, _config.sample_rate, _config.bit_depth);
-    if (!writer->init()) {
-      _writer_error.store(true, std::memory_order_relaxed);
-      return false;
-    }
-    std::cerr << "  → " << filename << "\n";
+    if (!make_group_writers(base_filename)) return false;
     current_file_frames = 0;
     return true;
   };
@@ -376,7 +437,7 @@ void Recorder::writer_thread_func() {
     if (frames_per_split > 0 && current_file_frames + frames >= frames_per_split) {
       size_t fit = frames_per_split - current_file_frames;
       if (fit > 0) {
-        if (!writer->write_samples(buf.data(), fit)) {
+        if (!write_to_groups(buf.data(), fit)) {
           _writer_error.store(true, std::memory_order_relaxed);
           return;
         }
@@ -387,7 +448,7 @@ void Recorder::writer_thread_func() {
 
       size_t leftover = frames - fit;
       if (leftover > 0) {
-        if (!writer->write_samples(buf.data() + fit * channels, leftover)) {
+        if (!write_to_groups(buf.data() + fit * channels, leftover)) {
           _writer_error.store(true, std::memory_order_relaxed);
           return;
         }
@@ -397,14 +458,21 @@ void Recorder::writer_thread_func() {
       continue;
     }
 
-    // Size-based rotation: check before writing
-    std::error_code ec;
-    auto size = std::filesystem::file_size(filename, ec);
-    if (!ec && size >= max_file_bytes) {
+    // Size-based rotation: check largest file in group
+    bool need_rotate = false;
+    for (auto& cg : groups) {
+      std::error_code ec;
+      auto sz = std::filesystem::file_size(cg.filename, ec);
+      if (!ec && sz >= max_file_bytes) {
+        need_rotate = true;
+        break;
+      }
+    }
+    if (need_rotate) {
       if (!rotate()) return;
     }
 
-    if (!writer->write_samples(buf.data(), frames)) {
+    if (!write_to_groups(buf.data(), frames)) {
       _writer_error.store(true, std::memory_order_relaxed);
       return;
     }
@@ -412,7 +480,7 @@ void Recorder::writer_thread_func() {
     _total_frames.fetch_add(frames, std::memory_order_relaxed);
   }
 
-  writer->finalize();
+  finalize_groups();
   _file_count.store(file_index, std::memory_order_relaxed);
 }
 
