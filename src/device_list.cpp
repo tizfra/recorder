@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 namespace recorder {
 
 static bool is_builtin_or_virtual(const char* name) {
@@ -142,6 +146,23 @@ void print_input_devices() {
 std::string find_usb_disk() {
   namespace fs = std::filesystem;
 #ifdef __APPLE__
+  auto to_nfc = [](const std::string& s) -> std::string {
+    CFStringRef ref = CFStringCreateWithBytes(kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(s.data()), s.size(),
+        kCFStringEncodingUTF8, false);
+    if (!ref) return s;
+    CFMutableStringRef mut = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, ref);
+    CFRelease(ref);
+    if (!mut) return s;
+    CFStringNormalize(mut, kCFStringNormalizationFormC);
+    CFIndex len = CFStringGetMaximumSizeForEncoding(
+        CFStringGetLength(mut), kCFStringEncodingUTF8) + 1;
+    std::string result(len, '\0');
+    CFStringGetCString(mut, &result[0], len, kCFStringEncodingUTF8);
+    result.resize(std::strlen(result.c_str()));
+    CFRelease(mut);
+    return result;
+  };
   const fs::path volumes("/Volumes");
   if (!fs::is_directory(volumes)) return {};
   for (auto& entry : fs::directory_iterator(volumes)) {
@@ -149,7 +170,7 @@ std::string find_usb_disk() {
     auto name = entry.path().filename().string();
     if (name == "Macintosh HD") continue;
     if (access(entry.path().c_str(), W_OK) == 0) {
-      return entry.path().string();
+      return to_nfc(entry.path().string());
     }
   }
 #else

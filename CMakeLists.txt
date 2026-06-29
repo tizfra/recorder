@@ -156,6 +156,10 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(recorder PRIVATE Threads::Threads)
 
+if(APPLE)
+    target_link_libraries(recorder PRIVATE "-framework CoreFoundation")
+endif()
+
 # --- Tests ---
 enable_testing()
 
@@ -172,5 +176,9 @@ target_link_libraries(recorder_tests PRIVATE flac_dep Threads::Threads)
 
 # device_list.cpp uses portaudio for scan functions
 target_link_libraries(recorder_tests PRIVATE portaudio_dep)
+
+if(APPLE)
+    target_link_libraries(recorder_tests PRIVATE "-framework CoreFoundation")
+endif()
 
 add_test(NAME pipeline_tests COMMAND recorder_tests)

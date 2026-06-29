@@ -101,6 +101,29 @@ int run_gui(const Config& config) {
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
 
+  {
+    const char* font_paths[] = {
+#ifdef __APPLE__
+      "/System/Library/Fonts/SFNS.ttf",
+      "/System/Library/Fonts/Helvetica.ttc",
+#else
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+      "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+      "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+#endif
+    };
+    bool loaded = false;
+    for (auto* path : font_paths) {
+      if (io.Fonts->AddFontFromFileTTF(path, 16.0f)) {
+        loaded = true;
+        break;
+      }
+    }
+    if (!loaded) {
+      io.Fonts->AddFontDefault();
+    }
+  }
+
   // Mutable config for device hot-switching
   Config active_config = config;
 
