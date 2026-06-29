@@ -128,6 +128,19 @@ if(BUILD_GUI)
     target_link_libraries(imgui PUBLIC OpenGL::GL)
 endif()
 
+# --- Version from git ---
+execute_process(
+    COMMAND git describe --tags --always --dirty
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT GIT_VERSION)
+    set(GIT_VERSION "unknown")
+endif()
+configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/version.h @ONLY)
+
 # --- Application ---
 set(RECORDER_SOURCES
     src/main.cpp
@@ -145,7 +158,7 @@ endif()
 
 add_executable(recorder ${RECORDER_SOURCES})
 
-target_include_directories(recorder PRIVATE src)
+target_include_directories(recorder PRIVATE src ${CMAKE_BINARY_DIR})
 target_link_libraries(recorder PRIVATE portaudio_dep flac_dep)
 
 if(BUILD_GUI)

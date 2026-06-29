@@ -1,0 +1,3 @@
+#pragma once
+
+#define RECORDER_VERSION "@GIT_VERSION@"

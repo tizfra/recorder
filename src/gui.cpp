@@ -19,6 +19,7 @@
 #include "audio_writer.h"
 #include "device_list.h"
 #include "recorder.h"
+#include "version.h"
 
 namespace recorder {
 
@@ -57,7 +58,7 @@ int run_gui(const Config& config) {
   };
   auto create_window = [&]() {
     set_gl_hints();
-    return glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
+    return glfwCreateWindow(640, 360, "Audio Recorder " RECORDER_VERSION, nullptr, nullptr);
   };
 #else
   const char* glsl_version = "#version 130";
@@ -68,9 +69,9 @@ int run_gui(const Config& config) {
     GLFWmonitor* primary = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
     if (mode) {
-      return glfwCreateWindow(mode->width, mode->height, "Audio Recorder", primary, nullptr);
+      return glfwCreateWindow(mode->width, mode->height, "Audio Recorder " RECORDER_VERSION, primary, nullptr);
     }
-    return glfwCreateWindow(640, 360, "Audio Recorder", nullptr, nullptr);
+    return glfwCreateWindow(640, 360, "Audio Recorder " RECORDER_VERSION, nullptr, nullptr);
   };
 #endif
 
