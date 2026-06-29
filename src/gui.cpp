@@ -211,13 +211,11 @@ int run_gui(const Config& config) {
       double since_scan = std::chrono::duration<double>(now - last_scan).count();
       if (since_scan >= scan_interval_secs) {
         last_scan = now;
-        monitor.stop();
         auto devices = scan_input_devices();
 
         // Check for newly appeared USB devices
         for (auto& d : devices) {
           if (known_devices.find(d.name) == known_devices.end()) {
-            // New device appeared
             known_devices.insert(d.name);
             if (is_usb_device(d.name)) {
               active_config.device_index = d.index;
@@ -244,6 +242,7 @@ int run_gui(const Config& config) {
             current_names.find(selected_device_name) == current_names.end()) {
           std::fprintf(stderr, "Device removed: %s\n", selected_device_name.c_str());
           rec.reset();
+          monitor.stop();
 
           auto fallback = find_preferred_device();
           if (fallback) {
@@ -251,6 +250,7 @@ int run_gui(const Config& config) {
             active_config.channels = fallback->max_input_channels;
             selected_device_name = fallback->name;
             selected_channels = fallback->max_input_channels;
+            monitor.start(fallback->index, fallback->max_input_channels, active_config.sample_rate);
             std::fprintf(stderr, "Switched to: %s (%dch)\n", fallback->name.c_str(),
                          fallback->max_input_channels);
           } else {
@@ -261,11 +261,6 @@ int run_gui(const Config& config) {
         }
 
         known_devices = current_names;
-
-        // Restart monitor with current device
-        if (active_config.device_index >= 0) {
-          monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
-        }
       }
     }
 
