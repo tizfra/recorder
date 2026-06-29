@@ -139,6 +139,25 @@ int run_gui(const Config& config) {
 
   float split_minutes = static_cast<float>(active_config.split_seconds / 60.0);
 
+  std::string disk_space_str;
+  auto update_disk_space = [&]() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    auto dir = fs::path(active_config.output_file).parent_path();
+    if (dir.empty()) dir = ".";
+    auto si = fs::space(dir, ec);
+    if (ec) { disk_space_str.clear(); return; }
+    double bytes = static_cast<double>(si.available);
+    char buf[32];
+    if (bytes >= 1e12) {
+      std::snprintf(buf, sizeof(buf), "%.1f TB free", bytes / 1e12);
+    } else {
+      std::snprintf(buf, sizeof(buf), "%.1f GB free", bytes / 1e9);
+    }
+    disk_space_str = buf;
+  };
+  update_disk_space();
+
   // Audio monitor for VU meters when not recording
   AudioMonitor monitor;
   if (active_config.device_index >= 0) {
@@ -261,6 +280,7 @@ int run_gui(const Config& config) {
             active_config.output_file = unique_filename(output_basename);
           }
         }
+        update_disk_space();
       }
     }
 
@@ -333,6 +353,10 @@ int run_gui(const Config& config) {
                            static_cast<unsigned long long>(overruns));
       }
       ImGui::Text("%s", rec->current_file().c_str());
+      if (!disk_space_str.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), " (%s)", disk_space_str.c_str());
+      }
     } else {
       if (!selected_device_name.empty()) {
         int display_bits = format_needs_bit_shift(active_config.output_file)
@@ -341,6 +365,10 @@ int run_gui(const Config& config) {
         ImGui::Text("%s  %s  %dch / %dHz / %dbit", status_text, selected_device_name.c_str(),
                     active_config.channels, active_config.sample_rate, display_bits);
         ImGui::Text("%s", active_config.output_file.c_str());
+        if (!disk_space_str.empty()) {
+          ImGui::SameLine();
+          ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), " (%s)", disk_space_str.c_str());
+        }
       } else {
         ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
       }
