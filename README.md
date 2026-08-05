@@ -33,6 +33,14 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
+### To make shutdown button work
+
+```bash
+sudo visudo
+#YOUR_USERNAME
+ALL=(ALL) NOPASSWD: /sbin/shutdown
+```
+
 ### Without GUI (headless)
 
 ```bash
