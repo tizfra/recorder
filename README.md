@@ -1,6 +1,7 @@
 # recorder
 
-Multi-channel USB audio recorder. Records from USB audio interfaces via PortAudio to WAV or FLAC files. Includes a GUI with record/pause/stop controls and per-channel VU meters.
+Multi-channel USB audio player and recorder. Records from USB audio interfaces via PortAudio to WAV or FLAC files. Plays recorded track and mp3s tracks too (for example as background music)
+Includes a GUI with record/pause/stop controls and per-channel VU meters and a remote control thru web page.
 
 ## Features
 
@@ -16,16 +17,11 @@ Multi-channel USB audio recorder. Records from USB audio interfaces via PortAudi
 - Auto-detects mounted USB disks for output path
 - Hot-plugging: GUI detects USB audio devices and disks inserted/removed while idle
 - FLAC with >8 channels automatically splits into groups of 8 (WAV has no channel limit)
-
+- Convenient on-software button for shutdown Raspberry, the app and return to desktop
+- Can reproduce entire stereo mp3 folder on specified output channel
+- You can control all the software with your any browser simpli connecting at the address write on the software
+   
 ## Building
-
-### macOS
-
-```bash
-brew install cmake portaudio flac
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
 
 ### Linux (Raspberry Pi / Debian)
 
