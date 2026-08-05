@@ -302,7 +302,8 @@ int run_gui(const Config& config) {
   int output_max_channels = query_output_channel_count(active_config.device_index);
   bool playlist_mode = false;   // checkbox: se attivo, Play avvia la riproduzione dell'intera cartella
   bool playlist_active = false; // true mentre l'auto-avanzamento e' effettivamente in corso
-  int playlist_index = -1;      // indice in playback_files del file in riproduzione nella playlist
+  int playlist_index = -1;      // index into playback_files of the file playing in the playlist
+  float file_list_scroll_delta = 0.0f;  // pending scroll (px) applied to FileList on the next frame
 
   // --- Remote control (web server per smartphone/tablet) ---
   constexpr int kRemotePort = 8080;
@@ -485,7 +486,7 @@ int run_gui(const Config& config) {
         player = std::make_unique<AudioPlayer>(playback_files[playlist_index], active_config.device_index,
                                                 channel_offset, active_config.sample_rate);
         if (!player->open() || !player->start()) {
-          error_msg = "Impossibile riprodurre il file successivo della cartella.";
+          error_msg = "Unable to play the next file in the folder.";
           player.reset();
           playlist_active = false;
         }
@@ -573,7 +574,7 @@ int run_gui(const Config& config) {
           player = std::make_unique<AudioPlayer>(full_path, active_config.device_index,
                                                   channel_offset, active_config.sample_rate);
           if (!player->open() || !player->start()) {
-            error_msg = "Impossibile riprodurre il file.";
+            error_msg = "Unable to play the file.";
             player.reset();
           }
           break;
@@ -600,12 +601,12 @@ int run_gui(const Config& config) {
             player = std::make_unique<AudioPlayer>(playback_files[start_idx], active_config.device_index,
                                                     channel_offset, active_config.sample_rate);
             if (!player->open() || !player->start()) {
-              error_msg = "Impossibile riprodurre la cartella.";
+              error_msg = "Unable to play the folder.";
               player.reset();
               playlist_active = false;
             }
           } else {
-            error_msg = "Nessun file da riprodurre nella cartella.";
+            error_msg = "No files to play in this folder.";
           }
           break;
         }
@@ -683,7 +684,7 @@ int run_gui(const Config& config) {
 
     if (!remote_addr_display.empty()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.65f, 0.9f, 1.0f));
-      ImGui::TextWrapped("Remote address: %s", remote_addr_display.c_str());
+      ImGui::TextWrapped("Remote: %s", remote_addr_display.c_str());
       ImGui::PopStyleColor();
     }
 
@@ -885,16 +886,16 @@ int run_gui(const Config& config) {
 
       // Confirmation popup
       if (ImGui::BeginPopupModal("Confirm Shutdown", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Spegnere il Raspberry Pi?");
+        ImGui::Text("Shut down the Raspberry Pi?");
         if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
-          ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Registrazione in corso: verra' fermata.");
+          ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "A recording is in progress: it will be stopped.");
         }
         ImGui::Spacing();
-        if (ImGui::Button("Annulla", ImVec2(120, 0))) {
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
           ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Spegni", ImVec2(120, 0))) {
+        if (ImGui::Button("Shut Down", ImVec2(120, 0))) {
           if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
             rec->stop();
           }
@@ -949,8 +950,8 @@ int run_gui(const Config& config) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", error_msg.c_str());
       }
 
-      // Percorso corrente mostrato relativo alla radice (USB o cartella
-      // locale), per non esporre l'intero path assoluto sullo schermo.
+      // Current path shown relative to the root (USB drive or local
+      // folder), so the full absolute path isn't exposed on screen.
       std::string playback_root = current_usb_disk.empty() ? "." : current_usb_disk;
       {
         std::error_code ec;
@@ -959,7 +960,19 @@ int run_gui(const Config& config) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", rel_str.c_str());
       }
 
-      ImGui::BeginChild("FileList", ImVec2(0, 130), true);
+      constexpr float kFileListHeight = 130.0f;
+      // Narrower child window: leaves room on the right for the two
+      // up/down scroll buttons, handy on a touchscreen with no mouse wheel.
+      ImGui::BeginChild("FileList", ImVec2(-44, kFileListHeight), true);
+
+      // Applies any scroll requested by the up/down buttons on the
+      // previous frame — SetScrollY must be called while this child
+      // window is the current one, so it can't happen inside the
+      // buttons' own code (they're drawn after EndChild for layout).
+      if (file_list_scroll_delta != 0.0f) {
+        ImGui::SetScrollY(ImGui::GetScrollY() + file_list_scroll_delta);
+        file_list_scroll_delta = 0.0f;
+      }
 
       if (playback_dir != playback_root) {
         if (ImGui::Selectable("[..]")) {
@@ -989,7 +1002,18 @@ int run_gui(const Config& config) {
       }
       ImGui::EndChild();
 
-      // --- Selettore canali di output (es. "Ch 1-2", "Ch 3-4", ...) ---
+      ImGui::SameLine();
+      ImGui::BeginGroup();
+      float scroll_btn_h = (kFileListHeight - ImGui::GetStyle().ItemSpacing.y) * 0.5f;
+      if (ImGui::Button("^", ImVec2(40, scroll_btn_h))) {
+        file_list_scroll_delta = -60.0f;
+      }
+      if (ImGui::Button("v", ImVec2(40, scroll_btn_h))) {
+        file_list_scroll_delta = 60.0f;
+      }
+      ImGui::EndGroup();
+
+      // --- Output channel selector (e.g. "Ch 1-2", "Ch 3-4", ...) ---
       // Disabilitato mentre un player e' attivo: cambiare l'uscita a
       // meta' riproduzione richiederebbe stop + riapertura dello stream.
       bool is_playing_state = player && (player->state() == AudioPlayer::State::Playing ||
@@ -1016,7 +1040,7 @@ int run_gui(const Config& config) {
       // tutti i file della cartella a partire da quello selezionato,
       // avanzando automaticamente quando ciascuno finisce da solo.
       if (is_playing_state) ImGui::BeginDisabled();
-      ImGui::Checkbox("Playback entire folder", &playlist_mode);
+      ImGui::Checkbox("Play entire folder", &playlist_mode);
       if (is_playing_state) ImGui::EndDisabled();
 
       // --- Buttons, riga 1: Play/Pause/Resume, Stop ---
@@ -1036,7 +1060,7 @@ int run_gui(const Config& config) {
                                                   active_config.device_index, channel_offset,
                                                   active_config.sample_rate);
           if (!player->open() || !player->start()) {
-            error_msg = "Impossibile riprodurre il file.";
+            error_msg = "Unable to play the file.";
             player.reset();
             playlist_active = false;
           }
