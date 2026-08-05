@@ -26,7 +26,7 @@ Includes a GUI with record/pause/stop controls and per-channel VU meters and a r
 ### Linux (Raspberry Pi / Debian)
 
 ```bash
-sudo apt install build-essential cmake libportaudio19-dev libflac-dev
+sudo apt install build-essential cmake portaudio19-dev libflac-dev
 # For GUI support:
 sudo apt install libgl-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev
 cmake -B build -DCMAKE_BUILD_TYPE=Release
