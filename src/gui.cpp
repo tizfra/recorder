@@ -683,7 +683,7 @@ int run_gui(const Config& config) {
 
     if (!remote_addr_display.empty()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.65f, 0.9f, 1.0f));
-      ImGui::TextWrapped("Remoto: %s", remote_addr_display.c_str());
+      ImGui::TextWrapped("Remote address: %s", remote_addr_display.c_str());
       ImGui::PopStyleColor();
     }
 
@@ -1016,7 +1016,7 @@ int run_gui(const Config& config) {
       // tutti i file della cartella a partire da quello selezionato,
       // avanzando automaticamente quando ciascuno finisce da solo.
       if (is_playing_state) ImGui::BeginDisabled();
-      ImGui::Checkbox("Riproduci tutta la cartella", &playlist_mode);
+      ImGui::Checkbox("Playback entire folder", &playlist_mode);
       if (is_playing_state) ImGui::EndDisabled();
 
       // --- Buttons, riga 1: Play/Pause/Resume, Stop ---
@@ -1102,7 +1102,7 @@ int run_gui(const Config& config) {
         ImGui::Text("%s / %s", t1, t2);
       } else {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Seleziona un file e premi Play");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a file and press Play");
       }
 
       // --- VU Meters ---
