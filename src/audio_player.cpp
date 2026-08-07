@@ -140,6 +140,7 @@ bool AudioPlayer::open() {
   _cb_ctx.stream_channels = stream_channels;
   _cb_ctx.channel_offset = _channel_offset;
   _cb_ctx.volume_db = &_volume_db;
+  _cb_ctx.state = &_state;
 
   PaError err = Pa_OpenStream(
       reinterpret_cast<PaStream**>(&_stream), nullptr, &out_params, _stream_sample_rate,
@@ -185,7 +186,11 @@ void AudioPlayer::stop() {
   _reader_running.store(false, std::memory_order_relaxed);
   if (_reader_thread.joinable()) _reader_thread.join();
   if (_stream) {
-    Pa_StopStream(reinterpret_cast<PaStream*>(_stream));
+    // Pa_AbortStream invece di Pa_StopStream: quest'ultimo, per
+    // specifica PortAudio, ASPETTA che tutto l'audio gia' in coda finisca
+    // di suonare prima di ritornare — con lo stop "a scatto" che ci
+    // serve qui, vogliamo interrompere subito senza aspettare il drain.
+    Pa_AbortStream(reinterpret_cast<PaStream*>(_stream));
     Pa_CloseStream(reinterpret_cast<PaStream*>(_stream));
     _stream = nullptr;
   }
@@ -308,6 +313,19 @@ int AudioPlayer::pa_callback(const void*, void* output, unsigned long frame_coun
   // gli under-run (dati mancanti dal ring) sia i canali "extra" oltre
   // [offset, offset+file_ch) che il device richiede ma il file non usa.
   std::memset(out, 0, static_cast<size_t>(frame_count) * stream_ch * sizeof(int32_t));
+
+  // In pausa: silenzio immediato (gia' scritto sopra) e usciamo SENZA
+  // leggere dal ring buffer. Il reader thread nel frattempo smette di
+  // riempirlo (vedi reader_thread_func), quindi il contenuto gia'
+  // pre-caricato resta congelato — alla ripresa si riparte esattamente
+  // da li', senza salti in avanti ne' click. Se invece continuassimo a
+  // drenare il ring anche in pausa, si sentirebbe ancora l'audio gia'
+  // bufferizzato (fino a ~1s) prima del silenzio effettivo.
+  AudioPlayer::State st = ctx->state ? ctx->state->load(std::memory_order_relaxed)
+                                     : AudioPlayer::State::Playing;
+  if (st == AudioPlayer::State::Paused) {
+    return paContinue;
+  }
 
   size_t needed_file_samples = static_cast<size_t>(frame_count) * file_ch;
   std::vector<int32_t> file_buf(needed_file_samples);

@@ -544,8 +544,10 @@ int run_gui(const Config& config) {
           }
           break;
         case RemoteCommandType::SwitchToPlaybackMode:
-          gui_mode = GuiMode::Playback;
-          monitor.stop();
+          if (!(rec && (rstate == Recorder::State::Recording || rstate == Recorder::State::Paused))) {
+            gui_mode = GuiMode::Playback;
+            monitor.stop();
+          }
           break;
         case RemoteCommandType::PlaybackNavigate: {
           std::string root = current_usb_disk.empty() ? "." : current_usb_disk;

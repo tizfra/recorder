@@ -94,6 +94,7 @@ class AudioPlayer {
                            // da quello nativo, es. interfacce USB multicanale fisse)
     int channel_offset;   // canale dello stream da cui iniziare a scrivere i campioni del file
     std::atomic<float>* volume_db;  // letto una volta per buffer, non per singolo campione
+    std::atomic<State>* state;      // per andare in silenzio immediato quando State::Paused
   };
 
   std::string _path;

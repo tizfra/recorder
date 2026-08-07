@@ -219,12 +219,36 @@ function setMode(mode) {
 }
 
 async function cmd(name, body) {
-  await fetch('/api/' + name, {
+  const opts = {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: body ? JSON.stringify(body) : undefined,
-  });
-  refresh();
+  };
+  // Un solo tentativo di reinvio se la richiesta fallisce (es. pacchetto
+  // perso su WiFi): senza questo, un comando perso sparisce in silenzio
+  // e la UI (gia' aggiornata otticamente per alcuni comandi, es. le tab)
+  // resta disallineata dallo stato reale dell'app finche' non tocchi
+  // di nuovo qualcosa.
+  let ok = false;
+  for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+    try {
+      const res = await fetch('/api/' + name, opts);
+      ok = res.ok;
+    } catch (e) {
+      // errore di rete, si passa al retry (se primo tentativo) o si
+      // abbandona (il refresh successivo mostrera' comunque lo stato
+      // reale, correggendo eventuali disallineamenti ottimistici)
+    }
+    if (!ok && attempt === 0) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+  }
+  // Piccolo ritardo prima di rileggere lo stato: il loop principale
+  // dell'app processa i comandi remoti ogni ~50ms, non istantaneamente:
+  // un refresh troppo immediato rischia di leggere lo stato ANCORA
+  // vecchio e sembrare che il comando non abbia avuto effetto, quando in
+  // realta' e' solo questione di tempistica.
+  setTimeout(refresh, 120);
 }
 
 function playSelected() {
