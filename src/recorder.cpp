@@ -2,6 +2,7 @@
 
 #include <portaudio.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -115,8 +116,34 @@ std::string Recorder::make_split_filename(const std::string& base, int index) {
   return stem + buf + ext;
 }
 
-static std::string make_channel_group_filename(const std::string& base, int first_ch,
-                                                int last_ch) {
+// Comprime un elenco di canali (indici 0-based) in una stringa leggibile
+// con numerazione 1-based, raggruppando i run consecutivi. Es. i canali
+// 0-based {0,1,8,9} (cioe' i canali 1,2,9,10 del device) diventano
+// "01-02_09-10"; un singolo canale isolato appare come "05" senza range.
+static std::string format_channel_suffix(const std::vector<int>& channel_indices_0based) {
+  std::vector<int> sorted_ch(channel_indices_0based.begin(), channel_indices_0based.end());
+  std::sort(sorted_ch.begin(), sorted_ch.end());
+
+  std::string out;
+  size_t i = 0;
+  while (i < sorted_ch.size()) {
+    size_t j = i;
+    while (j + 1 < sorted_ch.size() && sorted_ch[j + 1] == sorted_ch[j] + 1) ++j;
+    char buf[16];
+    if (j == i) {
+      std::snprintf(buf, sizeof(buf), "%02d", sorted_ch[i] + 1);
+    } else {
+      std::snprintf(buf, sizeof(buf), "%02d-%02d", sorted_ch[i] + 1, sorted_ch[j] + 1);
+    }
+    if (!out.empty()) out += "_";
+    out += buf;
+    i = j + 1;
+  }
+  return out;
+}
+
+static std::string make_channel_suffixed_filename(const std::string& base,
+                                                   const std::string& channel_suffix) {
   std::string stem = base;
   std::string ext = ".flac";
   auto dot = base.rfind('.');
@@ -124,9 +151,7 @@ static std::string make_channel_group_filename(const std::string& base, int firs
     stem = base.substr(0, dot);
     ext = base.substr(dot);
   }
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "_ch%02d-%02d", first_ch, last_ch);
-  return stem + buf + ext;
+  return stem + "_ch" + channel_suffix + ext;
 }
 
 
@@ -175,9 +200,24 @@ bool Recorder::open() {
     return false;
   }
 
+  // Il campo record_channels seleziona quali canali finiscono nel file
+  // (gestito interamente in writer_thread_func): qui validiamo solo che
+  // gli indici forniti siano dentro il range aperto sullo stream, cosi'
+  // un valore fuori range viene segnalato subito invece che silenziato
+  // dopo l'avvio della registrazione.
+  for (int idx : _config.record_channels) {
+    if (idx < 0 || idx >= _config.channels) {
+      std::cerr << "Error: record_channels contains index " << idx << " out of range [0, "
+                << _config.channels << ")\n";
+      return false;
+    }
+  }
+
   int max_ch = max_channels_for_format(_config.output_file);
-  if (_config.channels > max_ch) {
-    std::cerr << "Recording " << _config.channels << " channels in groups of " << max_ch << "\n";
+  int write_channels = _config.record_channels.empty()
+      ? _config.channels : static_cast<int>(_config.record_channels.size());
+  if (write_channels > max_ch) {
+    std::cerr << "Recording " << write_channels << " channels in groups of " << max_ch << "\n";
   }
 
   int shift = format_needs_bit_shift(_config.output_file) ? 32 - _config.bit_depth : 0;
@@ -223,9 +263,11 @@ bool Recorder::start() {
   _accumulated_seconds = 0.0;
   _segment_start = std::chrono::steady_clock::now();
 
-  std::cerr << "Recording: device=\"" << _device_name << "\", " << _config.channels << "ch, "
-            << _config.sample_rate << "Hz, " << _config.bit_depth << "bit → "
-            << _config.output_file << "\n";
+  int write_channels = _config.record_channels.empty()
+      ? _config.channels : static_cast<int>(_config.record_channels.size());
+  std::cerr << "Recording: device=\"" << _device_name << "\", " << _config.channels
+            << "ch captured, " << write_channels << "ch written, " << _config.sample_rate
+            << "Hz, " << _config.bit_depth << "bit → " << _config.output_file << "\n";
   if (_config.split_seconds > 0) {
     std::cerr << "Splitting every " << _config.split_seconds / 60.0 << " minutes\n";
   }
@@ -288,6 +330,11 @@ int Recorder::pa_callback(const void* input, void* /*output*/, unsigned long fra
   const auto* in = static_cast<const int32_t*>(input);
   const size_t total_samples = frame_count * ctx->channels;
 
+  // Nota: qui catturiamo SEMPRE tutti i ctx->channels canali del device
+  // nel ring buffer, indipendentemente da quali verranno poi scritti su
+  // file (quella selezione avviene in writer_thread_func). Questo tiene
+  // i VU meter attivi su tutti i canali anche quando se ne registra solo
+  // un sottoinsieme, utile per scegliere quali canali includere.
   if (ctx->shift == 0) {
     size_t written = ctx->ring->write(in, total_samples);
     if (written < total_samples) {
@@ -321,17 +368,34 @@ int Recorder::pa_callback(const void* input, void* /*output*/, unsigned long fra
 static constexpr uint64_t max_file_bytes = 3900000000ULL;
 
 struct ChannelGroup {
-  int first_ch;
-  int group_channels;
+  // Indici (0-based, dentro il frame interleaved a _config.channels
+  // canali letto dal ring buffer) dei canali che questo gruppo scrive
+  // sul proprio file. Non necessariamente contigui: riflettono l'ordine
+  // di _config.record_channels quando e' stata fatta una selezione.
+  std::vector<int> channel_indices;
   std::unique_ptr<AudioWriter> writer;
   std::vector<int32_t> deinterleave_buf;
   std::string filename;
 };
 
 void Recorder::writer_thread_func() {
-  const int channels = _config.channels;
+  const int channels = _config.channels;  // larghezza del frame interleaved nel ring buffer
+
+  // Canali effettivamente da scrivere su file, nell'ordine desiderato.
+  // Vuoto in _config.record_channels = registra tutti i canali dello
+  // stream, nello stesso ordine nativo: e' il default e ricalca
+  // esattamente il comportamento precedente all'introduzione di questo
+  // campo.
+  std::vector<int> active_channels = _config.record_channels;
+  if (active_channels.empty()) {
+    active_channels.resize(channels);
+    for (int i = 0; i < channels; ++i) active_channels[i] = i;
+  }
+  const bool full_native_order = _config.record_channels.empty();
+  const int write_channels = static_cast<int>(active_channels.size());
+
   const int max_ch = max_channels_for_format(_config.output_file);
-  const int num_groups = (channels > max_ch) ? (channels + max_ch - 1) / max_ch : 1;
+  const int num_groups = (write_channels > max_ch) ? (write_channels + max_ch - 1) / max_ch : 1;
   const bool multi_group = num_groups > 1;
   const size_t batch_samples = 4096 * channels;
   std::vector<int32_t> buf(batch_samples);
@@ -345,29 +409,38 @@ void Recorder::writer_thread_func() {
   bool use_splits = frames_per_split > 0;
   std::vector<ChannelGroup> groups;
 
-  const int channels_per_group = multi_group ? max_ch : channels;
+  const int channels_per_group = multi_group ? max_ch : write_channels;
 
   auto make_group_writers = [&](const std::string& base) -> bool {
     groups.clear();
     for (int g = 0; g < num_groups; ++g) {
       ChannelGroup cg;
-      cg.first_ch = g * channels_per_group;
-      cg.group_channels = std::min(channels_per_group, channels - cg.first_ch);
+      int start = g * channels_per_group;
+      int count = std::min(channels_per_group, write_channels - start);
+      cg.channel_indices.assign(active_channels.begin() + start,
+                                active_channels.begin() + start + count);
 
-      if (multi_group) {
-        cg.filename = make_channel_group_filename(base, cg.first_ch + 1,
-                                                   cg.first_ch + cg.group_channels);
+      // Include i canali nel nome file ogni volta che la registrazione
+      // NON copre tutti i canali dello stream (full_native_order=false),
+      // non solo quando serve dividere in piu' file: cosi' anche una
+      // selezione che sta comoda in un unico file (es. canali 1,2,9,10 di
+      // un device a 32ch, sotto il limite del formato) resta identificabile
+      // dal nome senza doverlo aprire — utile perche' WAV/FLAC non hanno
+      // un modo standard di etichettare i singoli canali che un editor
+      // come Audacity possa mostrare.
+      if (multi_group || !full_native_order) {
+        cg.filename = make_channel_suffixed_filename(base, format_channel_suffix(cg.channel_indices));
       } else {
         cg.filename = base;
       }
 
-      cg.writer = create_writer(cg.filename, cg.group_channels,
+      cg.writer = create_writer(cg.filename, static_cast<int>(cg.channel_indices.size()),
                                _config.sample_rate, _config.bit_depth);
       if (!cg.writer->init()) {
         _writer_error.store(true, std::memory_order_relaxed);
         return false;
       }
-      cg.deinterleave_buf.resize(4096 * cg.group_channels);
+      cg.deinterleave_buf.resize(4096 * cg.channel_indices.size());
       std::cerr << "  → " << cg.filename << "\n";
       groups.push_back(std::move(cg));
     }
@@ -375,13 +448,18 @@ void Recorder::writer_thread_func() {
   };
 
   auto write_to_groups = [&](const int32_t* data, size_t frames) -> bool {
-    if (!multi_group) {
+    // Percorso rapido: nessuna selezione (registra tutti i canali nel
+    // loro ordine nativo) e nessuno split in gruppi — stesso identico
+    // comportamento/prestazioni di prima dell'introduzione di
+    // record_channels, nessuna copia extra per de-interleave.
+    if (!multi_group && full_native_order) {
       return groups[0].writer->write_samples(data, frames);
     }
     for (auto& cg : groups) {
+      int gc = static_cast<int>(cg.channel_indices.size());
       for (size_t f = 0; f < frames; ++f) {
-        for (int c = 0; c < cg.group_channels; ++c) {
-          cg.deinterleave_buf[f * cg.group_channels + c] = data[f * channels + cg.first_ch + c];
+        for (int c = 0; c < gc; ++c) {
+          cg.deinterleave_buf[f * gc + c] = data[f * channels + cg.channel_indices[c]];
         }
       }
       if (!cg.writer->write_samples(cg.deinterleave_buf.data(), frames)) return false;

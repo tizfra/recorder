@@ -62,6 +62,7 @@ std::string status_to_json(const RemoteStatus& s) {
   j << "\"playback_current_file\":\"" << json_escape(s.playback_current_file) << "\",";
   j << "\"playback_state\":\"" << json_escape(s.playback_state) << "\",";
   j << "\"playback_position\":" << s.playback_position << ",";
+  j << "\"playback_volume_db\":" << s.playback_volume_db << ",";
   j << "\"playback_duration\":" << s.playback_duration << ",";
   j << "\"playback_channels\":" << s.playback_channels << ",";
   j << "\"playback_channel_offset\":" << s.playback_channel_offset << ",";
@@ -119,7 +120,7 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Recorder — Controllo remoto</title>
+<title>Recorder — Remote Control</title>
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; background:#181818; color:#eee;
          margin:0; padding:16px; }
@@ -147,7 +148,7 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
 </head>
 <body>
 
-<h1>Audio Recorder — remoto</h1>
+<h1>Audio Recorder — remote</h1>
 
 <div class="tabs">
   <button id="tabRecord" class="active" onclick="setMode('record')">Record</button>
@@ -170,12 +171,15 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
   <div class="filelist" id="fileList"></div>
   <input type="range" id="seekBar" min="0" max="100" value="0"
          onchange="seek(this.value)">
+  <div class="status-line" id="volumeLabel">Volume: -5.0 dB</div>
+  <input type="range" id="volumeSlider" min="-24" max="6" step="0.5" value="-5"
+         onchange="setVolume(this.value)">
   <div class="row">
     <select id="channelSelect"></select>
   </div>
   <div class="row">
     <button class="go" onclick="playSelected()">▶ Play</button>
-    <button class="go" onclick="playFolder()">▶▶ Tutta la cartella</button>
+    <button class="go" onclick="playFolder()">▶▶ Entire Folder</button>
   </div>
   <div class="row">
     <button onclick="cmd('playback_pause')">Pause</button>
@@ -186,8 +190,8 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
 
 <div class="card">
   <div class="row">
-    <button class="danger" onclick="if(confirm('Uscire dal programma?')) cmd('quit')">Quit</button>
-    <button class="danger" onclick="if(confirm('Spegnere il Raspberry?')) cmd('shutdown')">Shutdown</button>
+    <button class="danger" onclick="if(confirm('Quit the program?')) cmd('quit')">Quit</button>
+    <button class="danger" onclick="if(confirm('Shut down the Raspberry?')) cmd('shutdown')">Shutdown</button>
   </div>
 </div>
 
@@ -195,12 +199,22 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
 
 <script>
 let selectedFile = null;
+let currentMode = null;  // ultima modalita' nota dall'app, evita comandi ridondanti da refresh()
 
-function setMode(mode) {
+// Aggiorna solo la UI (tab attiva, pannello visibile), senza inviare
+// nessun comando: usata sia da setMode() (dopo un click) sia da
+// refresh() (per riflettere lo stato reale dell'app appena aperta la
+// pagina, o se cambiata dal touchscreen del Pi).
+function applyMode(mode) {
+  currentMode = mode;
   document.getElementById('recordCard').style.display = mode === 'record' ? '' : 'none';
   document.getElementById('playbackCard').style.display = mode === 'playback' ? '' : 'none';
   document.getElementById('tabRecord').classList.toggle('active', mode === 'record');
   document.getElementById('tabPlayback').classList.toggle('active', mode === 'playback');
+}
+
+function setMode(mode) {
+  applyMode(mode);
   cmd(mode === 'record' ? 'mode_record' : 'mode_playback');
 }
 
@@ -233,6 +247,10 @@ function seek(value) {
   cmd('playback_seek', {seconds: parseFloat(value)});
 }
 
+function setVolume(value) {
+  cmd('playback_volume', {db: parseFloat(value)});
+}
+
 function fmtTime(s) {
   s = Math.floor(s);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -245,12 +263,16 @@ async function refresh() {
     const res = await fetch('/api/status');
     const st = await res.json();
 
+    if (st.mode && st.mode !== currentMode) {
+      applyMode(st.mode);
+    }
+
     document.getElementById('recStatus').textContent =
       `${st.record_state}  ${fmtTime(st.record_elapsed)}  ${st.record_file || ''}`;
     document.getElementById('playStatus').textContent =
       `${st.playback_state}  ${fmtTime(st.playback_position)} / ${fmtTime(st.playback_duration)}` +
       (st.playback_current_file ? `  ${st.playback_current_file}` : '') +
-      (st.playlist_active ? '  [cartella]' : '');
+      (st.playlist_active ? '  [folder]' : '');
     document.getElementById('errorLine').textContent = st.error_message || '';
     document.getElementById('pathLine').textContent = st.playback_current_dir || '/';
 
@@ -258,6 +280,12 @@ async function refresh() {
       document.getElementById('seekBar').max = st.playback_duration || 100;
       document.getElementById('seekBar').value = st.playback_position || 0;
     }
+
+    if (!document.getElementById('volumeSlider').matches(':active')) {
+      document.getElementById('volumeSlider').value = st.playback_volume_db;
+    }
+    document.getElementById('volumeLabel').textContent =
+      'Volume: ' + Number(st.playback_volume_db).toFixed(1) + ' dB';
 
     const list = document.getElementById('fileList');
     list.innerHTML = '';
@@ -297,8 +325,13 @@ async function refresh() {
         sel.appendChild(opt);
       }
     }
+    // Allinea la selezione al valore reale lato app, cosi' la tendina
+    // non mostra semplicemente il default del browser (prima opzione).
+    if (document.activeElement !== sel) {
+      sel.value = st.playback_channel_offset;
+    }
   } catch (e) {
-    document.getElementById('errorLine').textContent = 'Connessione persa';
+    document.getElementById('errorLine').textContent = 'Connection lost';
   }
 }
 
@@ -429,6 +462,19 @@ bool RemoteControl::start(int port) {
     }
     RemoteCommand cmd{RemoteCommandType::PlaybackSeek};
     cmd.float_arg = *seconds;
+    push_command(std::move(cmd));
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  _server->Post("/api/playback_volume", [this](const httplib::Request& req, httplib::Response& res) {
+    auto db = json_get_number(req.body, "db");
+    if (!db) {
+      res.status = 400;
+      res.set_content("{\"ok\":false,\"error\":\"missing db\"}", "application/json");
+      return;
+    }
+    RemoteCommand cmd{RemoteCommandType::PlaybackSetVolume};
+    cmd.float_arg = *db;
     push_command(std::move(cmd));
     res.set_content("{\"ok\":true}", "application/json");
   });

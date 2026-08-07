@@ -27,6 +27,7 @@ enum class RemoteCommandType {
   PlaybackPause,
   PlaybackResume,
   PlaybackSeek,       // usa float_arg = secondi
+  PlaybackSetVolume,  // usa float_arg = dB (-24..+6)
   SwitchToRecordMode,
   SwitchToPlaybackMode,
   Quit,
@@ -60,6 +61,7 @@ struct RemoteStatus {
   std::string playback_current_file;
   std::string playback_state;     // "idle" | "playing" | "paused" | "stopped"
   double playback_position = 0.0;
+  float playback_volume_db = -5.0f;
   double playback_duration = 0.0;
   int playback_channels = 0;
   int playback_channel_offset = 0;

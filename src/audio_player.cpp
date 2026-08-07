@@ -139,6 +139,7 @@ bool AudioPlayer::open() {
   _cb_ctx.file_channels = _channels;
   _cb_ctx.stream_channels = stream_channels;
   _cb_ctx.channel_offset = _channel_offset;
+  _cb_ctx.volume_db = &_volume_db;
 
   PaError err = Pa_OpenStream(
       reinterpret_cast<PaStream**>(&_stream), nullptr, &out_params, _stream_sample_rate,
@@ -217,6 +218,11 @@ void AudioPlayer::seek(double seconds) {
   _cb_ctx.ring = _ring.get();
 
   if (prev == State::Playing) _state.store(State::Playing, std::memory_order_relaxed);
+}
+
+void AudioPlayer::set_volume_db(float db) {
+  float clamped = std::clamp(db, -60.0f, 12.0f);
+  _volume_db.store(clamped, std::memory_order_relaxed);
 }
 
 double AudioPlayer::position_seconds() const {
@@ -308,15 +314,31 @@ int AudioPlayer::pa_callback(const void*, void* output, unsigned long frame_coun
   size_t got = ctx->ring->read(file_buf.data(), needed_file_samples);
   size_t frames_here = got / static_cast<size_t>(file_ch);
 
+  // Guadagno letto una volta per buffer (non per campione): sufficiente
+  // per una risposta percepita come istantanea allo slider del volume
+  // (il buffer copre pochi millisecondi), evita un'operazione atomica
+  // per ogni singolo campione.
+  float volume_db = ctx->volume_db ? ctx->volume_db->load(std::memory_order_relaxed) : 0.0f;
+  float gain = std::pow(10.0f, volume_db / 20.0f);
+  bool apply_gain = std::fabs(volume_db) > 0.001f;
+
   float peaks[MAX_CHANNELS] = {};
   int meter_channels = std::min(file_ch, static_cast<int>(MAX_CHANNELS));
   for (size_t i = 0; i < frames_here; ++i) {
     for (int c = 0; c < file_ch; ++c) {
       int32_t sample = file_buf[i * file_ch + c];
+      if (apply_gain) {
+        double scaled = static_cast<double>(sample) * gain;
+        scaled = std::clamp(scaled, -2147483648.0, 2147483647.0);
+        sample = static_cast<int32_t>(scaled);
+      }
       int dest = c + offset;
       if (dest >= 0 && dest < stream_ch) {
         out[i * stream_ch + dest] = sample;
       }
+      // Il VU meter riflette il segnale DOPO il guadagno: e' quello che
+      // arriva davvero al mixer, coerente con lo scopo del controllo
+      // volume (evitare di mandare un livello troppo alto).
       if (c < meter_channels) {
         float v = std::fabs(static_cast<float>(sample) / 2147483648.0f);
         if (v > peaks[c]) peaks[c] = v;

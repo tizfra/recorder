@@ -72,6 +72,17 @@ class AudioPlayer {
   int channel_offset() const { return _channel_offset; }
   LevelData& levels() { return _levels; }
 
+  // Volume applicato in tempo reale nel callback PortAudio, indipendente
+  // dal formato del file (WAV/FLAC/MP3). Puo' essere richiamato mentre il
+  // player e' in riproduzione, senza bisogno di fermarlo/riaprirlo — il
+  // cambio ha effetto dal prossimo buffer audio. Clampato a [-60, +12]
+  // dB per evitare valori estremi (silenzio totale o clipping severo).
+  // Default -5 dB (vedi costruttore): molti MP3 sono masterizzati con un
+  // livello piu' "caldo" delle registrazioni multitraccia della DL32S e
+  // arrivano al mixer troppo forte rispetto agli altri canali.
+  void set_volume_db(float db);
+  float volume_db() const { return _volume_db.load(std::memory_order_relaxed); }
+
  private:
   struct CallbackContext {
     SpscRingBuffer<int32_t>* ring;
@@ -82,6 +93,7 @@ class AudioPlayer {
                            // su device che rifiutano stream con un conteggio canali diverso
                            // da quello nativo, es. interfacce USB multicanale fisse)
     int channel_offset;   // canale dello stream da cui iniziare a scrivere i campioni del file
+    std::atomic<float>* volume_db;  // letto una volta per buffer, non per singolo campione
   };
 
   std::string _path;
@@ -112,6 +124,10 @@ class AudioPlayer {
   std::atomic<bool> _reader_running{false};
   std::atomic<uint64_t> _frames_played{0};
   std::atomic<bool> _finished_naturally{false};
+
+  // Default -5 dB: vedi commento su set_volume_db(). Atomico perche'
+  // letto dal thread audio (pa_callback) e scritto dal thread GUI.
+  std::atomic<float> _volume_db{-5.0f};
 
   LevelData _levels;
 

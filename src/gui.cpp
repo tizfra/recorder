@@ -138,6 +138,7 @@ int run_gui(const Config& config) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);  // niente barra del titolo/bordi
   };
   auto create_window = [&]() {
     set_gl_hints();
@@ -149,12 +150,15 @@ int run_gui(const Config& config) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);  // niente barra del titolo/bordi
     GLFWmonitor* primary = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
     if (mode) {
       // Finestra grande quanto lo schermo ma NON fullscreen esclusivo
       // (nullptr al posto di `primary`): resta gestita dal window
-      // manager, quindi compare sempre e puo' essere minimizzata.
+      // manager, quindi compare sempre e puo' essere minimizzata anche
+      // senza la barra del titolo (glfwIconifyWindow non dipende dai
+      // controlli di decorazione, funziona comunque via bottone Desktop).
       return glfwCreateWindow(mode->width, mode->height, "Audio Recorder " RECORDER_VERSION, nullptr, nullptr);
     }
     return glfwCreateWindow(640, 360, "Audio Recorder " RECORDER_VERSION, nullptr, nullptr);
@@ -233,6 +237,11 @@ int run_gui(const Config& config) {
   // Track selected device name for display
   std::string selected_device_name;
   int selected_channels = active_config.channels;
+  // Un elemento per canale del device corrente; true = incluso nella
+  // prossima registrazione. Tutti true di default (registra tutto, come
+  // prima dell'introduzione di questa funzionalita'). Ridimensionato e
+  // ripristinato a tutti true ogni volta che cambia il device attivo.
+  std::vector<bool> record_channel_selected;
   {
     auto preferred = find_preferred_device();
     if (preferred) {
@@ -242,6 +251,23 @@ int run_gui(const Config& config) {
       selected_channels = preferred->max_input_channels;
     }
   }
+  record_channel_selected.assign(std::max(active_config.channels, 0), true);
+
+  // Calcola l'elenco di canali selezionati per la prossima registrazione:
+  // vuoto se sono selezionati tutti (attiva il percorso rapido in
+  // Recorder, identico al comportamento pre-selezione), altrimenti gli
+  // indici 0-based dei canali spuntati. Usata sia dal bottone Record in
+  // GUI sia dal comando RecordStart via controllo remoto.
+  auto compute_record_channels = [&]() -> std::vector<int> {
+    std::vector<int> sel;
+    for (int c = 0; c < active_config.channels; ++c) {
+      if (c < static_cast<int>(record_channel_selected.size()) && record_channel_selected[c]) {
+        sel.push_back(c);
+      }
+    }
+    if (static_cast<int>(sel.size()) == active_config.channels) return {};  // tutti selezionati
+    return sel;
+  };
 
   // Track current USB disk path
   std::string current_usb_disk = find_usb_disk();
@@ -299,6 +325,10 @@ int run_gui(const Config& config) {
   auto last_file_scan = std::chrono::steady_clock::now();
   float playback_display_peak[MAX_CHANNELS] = {};
   int channel_offset = 0;
+  // Persiste tra un file e l'altro (non si resetta creando un nuovo
+  // AudioPlayer): di default -5dB, come richiesto per attenuare gli MP3
+  // che spesso arrivano al mixer piu' "caldi" delle registrazioni dirette.
+  float playback_volume_db = -5.0f;
   int output_max_channels = query_output_channel_count(active_config.device_index);
   bool playlist_mode = false;   // checkbox: se attivo, Play avvia la riproduzione dell'intera cartella
   bool playlist_active = false; // true mentre l'auto-avanzamento e' effettivamente in corso
@@ -361,6 +391,7 @@ int run_gui(const Config& config) {
               active_config.channels = d.max_input_channels;
               selected_device_name = d.name;
               selected_channels = d.max_input_channels;
+              record_channel_selected.assign(active_config.channels, true);
               rec.reset();
               monitor.stop();
               monitor.start(d.index, d.max_input_channels, active_config.sample_rate);
@@ -390,6 +421,7 @@ int run_gui(const Config& config) {
             active_config.channels = fallback->max_input_channels;
             selected_device_name = fallback->name;
             selected_channels = fallback->max_input_channels;
+            record_channel_selected.assign(active_config.channels, true);
             monitor.start(fallback->index, fallback->max_input_channels, active_config.sample_rate);
             output_max_channels = query_output_channel_count(active_config.device_index);
             std::fprintf(stderr, "Switched to: %s (%dch)\n", fallback->name.c_str(),
@@ -398,6 +430,7 @@ int run_gui(const Config& config) {
             selected_device_name.clear();
             selected_channels = 0;
             active_config.device_index = -1;
+            record_channel_selected.clear();
           }
         }
 
@@ -504,8 +537,8 @@ int run_gui(const Config& config) {
       switch (cmd->type) {
         case RemoteCommandType::SwitchToRecordMode:
           gui_mode = GuiMode::Record;
-          playlist_active = false;
-          if (player) { player->stop(); player.reset(); }
+          // Il player NON viene fermato: vedi commento sull'analogo
+          // toggle locale piu' sopra nel file.
           if (active_config.device_index >= 0 && !monitor.running()) {
             monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
           }
@@ -536,16 +569,29 @@ int run_gui(const Config& config) {
         case RemoteCommandType::RecordStart:
           if (!selected_device_name.empty() && (!rec || rstate == Recorder::State::Idle ||
                                                  rstate == Recorder::State::Stopped)) {
-            error_msg.clear();
-            std::string base = current_usb_disk.empty() ? output_basename
-                                                          : current_usb_disk + "/" + output_basename;
-            active_config.output_file = unique_filename(base);
-            monitor.stop();
-            rec = std::make_unique<Recorder>(active_config);
-            if (!rec->open() || !rec->start()) {
-              error_msg = "Failed to start recording.";
-              rec.reset();
-              monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+            bool any_channel_selected = std::any_of(record_channel_selected.begin(),
+                                                     record_channel_selected.end(),
+                                                     [](bool b) { return b; });
+            if (!any_channel_selected) {
+              error_msg = "Select at least one channel to record.";
+            } else {
+              error_msg.clear();
+              playlist_active = false;
+              if (player) {
+                player->stop();
+                player.reset();
+              }
+              active_config.record_channels = compute_record_channels();
+              std::string base = current_usb_disk.empty() ? output_basename
+                                                            : current_usb_disk + "/" + output_basename;
+              active_config.output_file = unique_filename(base);
+              monitor.stop();
+              rec = std::make_unique<Recorder>(active_config);
+              if (!rec->open() || !rec->start()) {
+                error_msg = "Failed to start recording.";
+                rec.reset();
+                monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+              }
             }
           }
           break;
@@ -623,6 +669,9 @@ int run_gui(const Config& config) {
         case RemoteCommandType::PlaybackSeek:
           if (player) player->seek(cmd->float_arg);
           break;
+        case RemoteCommandType::PlaybackSetVolume:
+          playback_volume_db = std::clamp(static_cast<float>(cmd->float_arg), -24.0f, 6.0f);
+          break;
         case RemoteCommandType::Quit:
           if (rec && (rstate == Recorder::State::Recording || rstate == Recorder::State::Paused)) {
             rec->stop();
@@ -640,6 +689,14 @@ int run_gui(const Config& config) {
           glfwSetWindowShouldClose(window, GLFW_TRUE);
           break;
       }
+    }
+
+    // Applica il volume corrente al player attivo, se presente. Fatto
+    // qui una volta per frame (non nei singoli punti di creazione del
+    // player) cosi' copre sia l'inizializzazione di un player appena
+    // creato sia i cambi live dello slider durante la riproduzione.
+    if (player) {
+      player->set_volume_db(playback_volume_db);
     }
 
     ImGui_ImplOpenGL3_NewFrame();
@@ -667,10 +724,10 @@ int run_gui(const Config& config) {
     // stesso testo visibile, nessuna collisione di ID ImGui.
     if (ImGui::RadioButton("Record##mode", gui_mode == GuiMode::Record)) {
       gui_mode = GuiMode::Record;
-      if (player) {
-        player->stop();
-        player.reset();
-      }
+      // Il player NON viene piu' fermato qui: passare alla schermata
+      // Record e' solo un cambio di vista, non deve interrompere una
+      // riproduzione in corso. Si ferma solo quando parte davvero una
+      // nuova registrazione (vedi il bottone Record piu' sotto).
       if (active_config.device_index >= 0 && !monitor.running()) {
         monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
       }
@@ -760,6 +817,41 @@ int run_gui(const Config& config) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", error_msg.c_str());
       }
 
+      // --- Recording channel selection (only editable while idle: changing
+      // which channels are captured mid-recording would require reopening
+      // both the stream and the file writer) ---
+      if (!is_recording && !selected_device_name.empty() && active_config.channels > 0) {
+        if (ImGui::CollapsingHeader("Recording Channels")) {
+          if (static_cast<int>(record_channel_selected.size()) != active_config.channels) {
+            record_channel_selected.assign(active_config.channels, true);
+          }
+          if (ImGui::Button("All", ImVec2(60, 0))) {
+            std::fill(record_channel_selected.begin(), record_channel_selected.end(), true);
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("None", ImVec2(60, 0))) {
+            std::fill(record_channel_selected.begin(), record_channel_selected.end(), false);
+          }
+
+          constexpr int kCols = 8;
+          ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit;
+          if (ImGui::BeginTable("ChannelGrid", kCols, table_flags)) {
+            for (int c = 0; c < active_config.channels; ++c) {
+              ImGui::TableNextColumn();
+              // Numero a 2 cifre (zero-padded) cosi' ogni cella ha la
+              // stessa larghezza indipendentemente dal canale (1 vs 32).
+              char label[8];
+              std::snprintf(label, sizeof(label), "%02d", c + 1);
+              bool sel = record_channel_selected[c];
+              if (ImGui::Checkbox(label, &sel)) {
+                record_channel_selected[c] = sel;
+              }
+            }
+            ImGui::EndTable();
+          }
+        }
+      }
+
       // --- Buttons, riga 1: Record/Pause/Resume, Stop, Eject ---
       bool has_device = !selected_device_name.empty();
       bool can_stop = state == Recorder::State::Recording || state == Recorder::State::Paused;
@@ -783,27 +875,42 @@ int run_gui(const Config& config) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
         if (row_button("Record", 0, 3, btn_h)) {
-          error_msg.clear();
-          if (rec) {
-            last_total_frames = rec->total_frames();
-            last_overruns = rec->overruns();
-            last_files_written = rec->files_written();
-            last_elapsed = rec->elapsed_seconds();
-          }
-          std::string base = current_usb_disk.empty()
-                                 ? output_basename
-                                 : current_usb_disk + "/" + output_basename;
-          active_config.output_file = unique_filename(base);
-          monitor.stop();
-          rec = std::make_unique<Recorder>(active_config);
-          if (!rec->open()) {
-            error_msg = "Failed to open audio device.";
-            rec.reset();
-            monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
-          } else if (!rec->start()) {
-            error_msg = "Failed to start recording.";
-            rec.reset();
-            monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+          bool any_channel_selected = std::any_of(record_channel_selected.begin(),
+                                                   record_channel_selected.end(),
+                                                   [](bool b) { return b; });
+          if (!any_channel_selected) {
+            error_msg = "Select at least one channel to record.";
+          } else {
+            error_msg.clear();
+            if (rec) {
+              last_total_frames = rec->total_frames();
+              last_overruns = rec->overruns();
+              last_files_written = rec->files_written();
+              last_elapsed = rec->elapsed_seconds();
+            }
+            // Solo ora, all'avvio vero e proprio di una nuova
+            // registrazione, fermiamo un'eventuale riproduzione in corso.
+            playlist_active = false;
+            if (player) {
+              player->stop();
+              player.reset();
+            }
+            active_config.record_channels = compute_record_channels();
+            std::string base = current_usb_disk.empty()
+                                   ? output_basename
+                                   : current_usb_disk + "/" + output_basename;
+            active_config.output_file = unique_filename(base);
+            monitor.stop();
+            rec = std::make_unique<Recorder>(active_config);
+            if (!rec->open()) {
+              error_msg = "Failed to open audio device.";
+              rec.reset();
+              monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+            } else if (!rec->start()) {
+              error_msg = "Failed to start recording.";
+              rec.reset();
+              monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
+            }
           }
         }
         ImGui::PopStyleColor(3);
@@ -869,10 +976,7 @@ int run_gui(const Config& config) {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.25f, 0.25f, 0.25f, 1.0f));
       if (row_button("Quit", 1, 3, btn_h)) {
-        if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
-          rec->stop();  // chiude i file in modo pulito prima di uscire
-        }
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
+        ImGui::OpenPopup("Confirm Quit");
       }
       ImGui::PopStyleColor(3);
 
@@ -884,7 +988,27 @@ int run_gui(const Config& config) {
       }
       ImGui::PopStyleColor(3);
 
-      // Confirmation popup
+      // Confirmation popup (Quit)
+      if (ImGui::BeginPopupModal("Confirm Quit", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Quit the application?");
+        if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
+          ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "A recording is in progress: it will be stopped.");
+        }
+        ImGui::Spacing();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Quit", ImVec2(120, 0))) {
+          if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
+            rec->stop();  // chiude i file in modo pulito prima di uscire
+          }
+          glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        ImGui::EndPopup();
+      }
+
+      // Confirmation popup (Shutdown)
       if (ImGui::BeginPopupModal("Confirm Shutdown", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Shut down the Raspberry Pi?");
         if (rec && (state == Recorder::State::Recording || state == Recorder::State::Paused)) {
@@ -1016,25 +1140,35 @@ int run_gui(const Config& config) {
       // --- Output channel selector (e.g. "Ch 1-2", "Ch 3-4", ...) ---
       // Disabilitato mentre un player e' attivo: cambiare l'uscita a
       // meta' riproduzione richiederebbe stop + riapertura dello stream.
+      // Frecce < / > invece di un menu a tendina: piu' rapido da toccare
+      // su schermo piccolo, senza dover aprire/chiudere un popup.
       bool is_playing_state = player && (player->state() == AudioPlayer::State::Playing ||
                                           player->state() == AudioPlayer::State::Paused);
       int max_pairs = std::max(1, output_max_channels / 2);
-      char combo_label[32];
-      std::snprintf(combo_label, sizeof(combo_label), "Ch %d-%d", channel_offset + 1, channel_offset + 2);
+      int max_offset = (max_pairs - 1) * 2;
+      if (channel_offset > max_offset) channel_offset = max_offset;
+      if (channel_offset < 0) channel_offset = 0;
+
       if (is_playing_state) ImGui::BeginDisabled();
-      ImGui::SetNextItemWidth(150);
-      if (ImGui::BeginCombo("Output", combo_label)) {
-        for (int p = 0; p < max_pairs; ++p) {
-          int off = p * 2;
-          char item_label[32];
-          std::snprintf(item_label, sizeof(item_label), "Ch %d-%d", off + 1, off + 2);
-          if (ImGui::Selectable(item_label, channel_offset == off)) {
-            channel_offset = off;
-          }
-        }
-        ImGui::EndCombo();
+      ImGui::Text("Output:");
+      ImGui::SameLine();
+      if (ImGui::Button("<", ImVec2(32, 0)) && channel_offset > 0) {
+        channel_offset -= 2;
+      }
+      ImGui::SameLine();
+      ImGui::Text("Ch %d-%d", channel_offset + 1, channel_offset + 2);
+      ImGui::SameLine();
+      if (ImGui::Button(">", ImVec2(32, 0)) && channel_offset < max_offset) {
+        channel_offset += 2;
       }
       if (is_playing_state) ImGui::EndDisabled();
+
+      // Il volume, a differenza del canale di uscita, si puo' cambiare
+      // liberamente anche durante la riproduzione: il guadagno si applica
+      // in tempo reale nel callback audio, senza bisogno di fermare o
+      // riaprire lo stream.
+      ImGui::SetNextItemWidth(-1);
+      ImGui::SliderFloat("Volume (dB)", &playback_volume_db, -24.0f, 6.0f, "%.1f dB");
 
       // Se attivo, premere Play avvia la riproduzione sequenziale di
       // tutti i file della cartella a partire da quello selezionato,
@@ -1106,10 +1240,30 @@ int run_gui(const Config& config) {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.25f, 0.25f, 0.25f, 1.0f));
       if (row_button("Quit", 1, 2, btn_h)) {
-        if (player) player->stop();
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
+        ImGui::OpenPopup("Confirm Quit");
       }
       ImGui::PopStyleColor(3);
+
+      // Confirmation popup (Quit) — stessa finestra di dialogo usata in
+      // Record mode (stesso ID "Confirm Quit"), ma richiamata qui perche'
+      // il ramo Record del codice non viene eseguito mentre si e' in
+      // Playback mode, quindi il popup non comparirebbe altrimenti.
+      if (ImGui::BeginPopupModal("Confirm Quit", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Quit the application?");
+        if (player && player->state() == AudioPlayer::State::Playing) {
+          ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Playback will be stopped.");
+        }
+        ImGui::Spacing();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Quit", ImVec2(120, 0))) {
+          if (player) player->stop();
+          glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        ImGui::EndPopup();
+      }
 
       // Seek bar
       if (player) {
@@ -1190,12 +1344,16 @@ int run_gui(const Config& config) {
         st.playback_position = player->position_seconds();
         st.playback_duration = player->duration_seconds();
         st.playback_channels = player->channels();
-        st.playback_channel_offset = player->channel_offset();
       } else {
         st.playback_state = "idle";
       }
+      // Pubblicato sempre (non solo dentro "if (player)"): channel_offset
+      // e' la variabile app-level usata per il PROSSIMO Play, quindi deve
+      // riflettersi anche quando nessun file sta suonando in questo momento.
+      st.playback_channel_offset = channel_offset;
       st.output_max_channels = output_max_channels;
       st.playlist_active = playlist_active;
+      st.playback_volume_db = playback_volume_db;
 
       st.error_message = error_msg;
       st.disk_space = disk_space_str;
