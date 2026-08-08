@@ -38,7 +38,7 @@ cmake --build build
 ```bash
 sudo visudo
 #YOUR_USERNAME
-ALL=(ALL) NOPASSWD: /sbin/shutdown
+ ALL=(ALL) NOPASSWD: /usr/bin/systemctl poweroff
 ```
 
 ### Without GUI (headless)
