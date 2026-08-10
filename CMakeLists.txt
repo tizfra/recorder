@@ -121,7 +121,11 @@ if(BUILD_GUI)
     set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+    # Wayland nativo (non solo X11/XWayland): necessario su Raspberry Pi
+    # OS Bookworm+, che usa labwc (compositor Wayland) come window
+    # manager di default. Richiede i pacchetti di sviluppo Wayland
+    # installati sul sistema di build (vedi CMakeLists.txt per i dettagli).
+    set(GLFW_BUILD_WAYLAND ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(glfw)
 
     FetchContent_Declare(
