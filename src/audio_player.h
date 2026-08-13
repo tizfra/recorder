@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "audio_reader.h"
 #include "recorder.h"     // LevelData, MAX_CHANNELS
@@ -26,6 +27,20 @@ class AudioPlayer {
  public:
   enum class State { Idle, Playing, Paused, Stopped };
 
+  // file_paths: uno o piu' file da riprodurre SINCRONIZZATI insieme,
+  // ciascuno instradato su un blocco consecutivo di canali nell'ordine
+  // dato (es. il primo file sui canali [offset, offset+ch0), il secondo
+  // su [offset+ch0, offset+ch0+ch1), ecc.). Pensato per riunire gruppi
+  // FLAC divisi per il limite di canali per file (es. una registrazione
+  // a 32 canali salvata come 4 file da 8 canali ciascuno). Con un solo
+  // file e' il caso normale di sempre.
+  //
+  // Vincoli quando i file sono piu' di uno: devono avere tutti la stessa
+  // frequenza di campionamento (sono attesi provenire dalla stessa
+  // registrazione originale), e il resampling automatico NON e'
+  // supportato in quel caso — open() fallisce con un messaggio chiaro
+  // se serve resampling e i file sono piu' di uno.
+  //
   // device_index: indice PortAudio da provare per l'output (tipicamente
   // lo stesso device usato per la registrazione). -1 = usa il device di
   // output di default del sistema. Se il device indicato non ha canali
@@ -34,17 +49,21 @@ class AudioPlayer {
   // nome che li abbia, prima di ripiegare sul default.
   //
   // channel_offset: canale dello stream (0-based) da cui iniziare a
-  // scrivere i campioni del file. Es. per un file stereo instradato sui
-  // canali USB 5-6 di un device a 32 canali, offset = 4. Se offset +
-  // channels() supera i canali nativi del device, open() lo azzera e
-  // stampa un avviso.
+  // scrivere i campioni combinati. Se offset + channels() supera i
+  // canali nativi del device, open() lo azzera e stampa un avviso.
   //
   // output_sample_rate: frequenza a cui aprire lo stream PortAudio. 0
-  // (default) = usa la frequenza nativa del file. Molti device USB
+  // (default) = usa la frequenza nativa dei file. Molti device USB
   // (incluse interfacce multicanale fisse) accettano solo una frequenza
   // specifica (es. 48000 Hz): se il file ha una frequenza diversa (tipico
   // per MP3, spesso a 44100 Hz), passare qui la frequenza del device fa
-  // si' che open() attivi un resampler lineare in tempo reale.
+  // si' che open() attivi un resampler lineare in tempo reale — ma solo
+  // nel caso a singolo file, vedi sopra.
+  explicit AudioPlayer(std::vector<std::string> file_paths, int device_index = -1,
+                       int channel_offset = 0, int output_sample_rate = 0);
+  // Comodo overload per il caso singolo file (il piu' comune): delega al
+  // costruttore sopra con un vettore di un solo elemento. Tutte le
+  // chiamate esistenti a singolo file restano valide cosi' come sono.
   explicit AudioPlayer(std::string file_path, int device_index = -1, int channel_offset = 0,
                        int output_sample_rate = 0);
   ~AudioPlayer();
@@ -60,14 +79,16 @@ class AudioPlayer {
   void seek(double seconds);
 
   State state() const { return _state.load(std::memory_order_relaxed); }
-  // True se lo stato e' diventato Stopped perche' il file e' arrivato
-  // alla fine da solo (EOF), invece che per una chiamata esplicita a
-  // stop(). Utile per l'auto-avanzamento in una playlist: si vuole
-  // passare al file successivo solo in questo caso, non quando l'utente
-  // ha premuto Stop volontariamente.
+  // True se lo stato e' diventato Stopped perche' il file (o il gruppo)
+  // e' arrivato alla fine da solo (EOF), invece che per una chiamata
+  // esplicita a stop(). Utile per l'auto-avanzamento in una playlist: si
+  // vuole passare al file successivo solo in questo caso, non quando
+  // l'utente ha premuto Stop volontariamente.
   bool finished_naturally() const { return _finished_naturally.load(std::memory_order_relaxed); }
   double position_seconds() const;
   double duration_seconds() const { return _duration_seconds; }
+  // Canali TOTALI combinati (somma dei canali di tutti i file del
+  // gruppo; con un solo file, semplicemente i suoi canali).
   int channels() const { return _channels; }
   int channel_offset() const { return _channel_offset; }
   LevelData& levels() { return _levels; }
@@ -77,9 +98,9 @@ class AudioPlayer {
   // player e' in riproduzione, senza bisogno di fermarlo/riaprirlo — il
   // cambio ha effetto dal prossimo buffer audio. Clampato a [-60, +12]
   // dB per evitare valori estremi (silenzio totale o clipping severo).
-  // Default -5 dB (vedi costruttore): molti MP3 sono masterizzati con un
-  // livello piu' "caldo" delle registrazioni multitraccia della DL32S e
-  // arrivano al mixer troppo forte rispetto agli altri canali.
+  // Default -5 dB: molti MP3 sono masterizzati con un livello piu'
+  // "caldo" delle registrazioni multitraccia della DL32S e arrivano al
+  // mixer troppo forte rispetto agli altri canali.
   void set_volume_db(float db);
   float volume_db() const { return _volume_db.load(std::memory_order_relaxed); }
 
@@ -88,32 +109,35 @@ class AudioPlayer {
     SpscRingBuffer<int32_t>* ring;
     std::atomic<uint64_t>* frames_played;
     LevelData* levels;
-    int file_channels;    // canali del file audio (quelli scritti nel ring dal reader thread)
+    int file_channels;    // larghezza TOTALE combinata (somma dei canali di tutti i file)
     int stream_channels;  // canali richiesti dal device PortAudio (puo' essere > file_channels
                            // su device che rifiutano stream con un conteggio canali diverso
                            // da quello nativo, es. interfacce USB multicanale fisse)
-    int channel_offset;   // canale dello stream da cui iniziare a scrivere i campioni del file
+    int channel_offset;   // canale dello stream da cui iniziare a scrivere i campioni combinati
     std::atomic<float>* volume_db;  // letto una volta per buffer, non per singolo campione
     std::atomic<State>* state;      // per andare in silenzio immediato quando State::Paused
   };
 
-  std::string _path;
+  std::vector<std::string> _paths;
   int _device_index;
   int _channel_offset;
-  std::unique_ptr<AudioReader> _reader;
+  std::vector<std::unique_ptr<AudioReader>> _readers;  // uno per file del gruppo
+  std::vector<int> _group_channels;  // canali di ciascun reader
+  std::vector<int> _group_offsets;   // offset cumulativo di ciascun reader nel frame combinato
   std::atomic<State> _state{State::Idle};
 
-  int _channels = 0;
-  int _file_sample_rate = 0;      // frequenza nativa del file
-  int _stream_sample_rate = 0;    // frequenza a cui e' aperto lo stream PortAudio
-                                   // (== _file_sample_rate se nessun resampling richiesto)
-  uint64_t _total_frames = 0;
+  int _channels = 0;               // totale combinato (somma dei gruppi)
+  int _file_sample_rate = 0;       // frequenza nativa dei file (deve combaciare tra tutti)
+  int _stream_sample_rate = 0;     // frequenza a cui e' aperto lo stream PortAudio
+                                    // (== _file_sample_rate se nessun resampling richiesto)
+  uint64_t _total_frames = 0;      // minimo tra tutti i file del gruppo (difensivo)
   double _duration_seconds = 0.0;
 
   // Posizione frazionaria (in frame del FILE) del prossimo campione da
-  // interpolare, persistente tra una chiamata al reader thread e
-  // l'altra: sempre in [0, ratio) dove ratio = file_rate/stream_rate.
-  // Azzerata su seek().
+  // interpolare durante il resampling — usata solo nel caso a singolo
+  // file (con piu' file il resampling non e' supportato). Persistente
+  // tra una chiamata al reader thread e l'altra: sempre in [0, ratio)
+  // dove ratio = file_rate/stream_rate. Azzerata su seek().
   double _resample_pos = 0.0;
 
   bool _pa_initialized = false;

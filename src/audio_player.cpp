@@ -57,10 +57,15 @@ int query_output_channel_count(int device_index) {
   return result;
 }
 
+AudioPlayer::AudioPlayer(std::vector<std::string> file_paths, int device_index,
+                         int channel_offset, int output_sample_rate)
+    : _paths(std::move(file_paths)), _device_index(device_index), _channel_offset(channel_offset),
+      _stream_sample_rate(output_sample_rate) {}
+
 AudioPlayer::AudioPlayer(std::string file_path, int device_index, int channel_offset,
                          int output_sample_rate)
-    : _path(std::move(file_path)), _device_index(device_index), _channel_offset(channel_offset),
-      _stream_sample_rate(output_sample_rate) {}
+    : AudioPlayer(std::vector<std::string>{std::move(file_path)}, device_index, channel_offset,
+                 output_sample_rate) {}
 
 AudioPlayer::~AudioPlayer() {
   stop();
@@ -68,16 +73,66 @@ AudioPlayer::~AudioPlayer() {
 }
 
 bool AudioPlayer::open() {
-  _reader = create_reader(_path);
-  if (!_reader) {
-    std::fprintf(stderr, "AudioPlayer: impossibile aprire il file '%s'\n", _path.c_str());
+  if (_paths.empty()) {
+    std::fprintf(stderr, "AudioPlayer: nessun file da aprire\n");
     return false;
   }
 
-  _channels = _reader->channels();
-  _file_sample_rate = _reader->sample_rate();
+  _readers.clear();
+  _group_channels.clear();
+  _group_offsets.clear();
+
+  for (auto& path : _paths) {
+    auto reader = create_reader(path);
+    if (!reader) {
+      std::fprintf(stderr, "AudioPlayer: impossibile aprire il file '%s'\n", path.c_str());
+      return false;
+    }
+    _readers.push_back(std::move(reader));
+  }
+
+  // Verifica coerenza tra i file del gruppo: stessa frequenza per tutti
+  // (sono attesi provenire dalla stessa registrazione originale), e la
+  // durata usata e' il minimo tra tutti (difensivo, nel caso uno dei
+  // file risultasse per qualche motivo piu' corto degli altri).
+  _file_sample_rate = _readers[0]->sample_rate();
+  _total_frames = _readers[0]->total_frames();
+  for (size_t i = 1; i < _readers.size(); ++i) {
+    if (_readers[i]->sample_rate() != _file_sample_rate) {
+      std::fprintf(stderr, "AudioPlayer: i file del gruppo hanno frequenze diverse (%d vs %d Hz) "
+                   "— riproduzione sincronizzata non possibile\n",
+                   _readers[i]->sample_rate(), _file_sample_rate);
+      return false;
+    }
+    _total_frames = std::min(_total_frames, _readers[i]->total_frames());
+  }
+
   _stream_sample_rate = (_stream_sample_rate > 0) ? _stream_sample_rate : _file_sample_rate;
-  _total_frames = _reader->total_frames();
+  if (_readers.size() > 1 && _stream_sample_rate != _file_sample_rate) {
+    // Il resampling multi-reader in lockstep e' molto piu' complesso da
+    // fare correttamente (ogni file avrebbe una propria posizione
+    // frazionaria da tenere sincronizzata) — dato che i gruppi sono
+    // sempre split della stessa registrazione originale, in pratica
+    // hanno gia' la frequenza del device: se non e' cosi', meglio
+    // fallire con un messaggio chiaro che riprodurre qualcosa di rotto.
+    std::fprintf(stderr, "AudioPlayer: resampling non supportato per la riproduzione di piu' file "
+                 "insieme (file a %d Hz, device a %d Hz)\n", _file_sample_rate, _stream_sample_rate);
+    return false;
+  }
+
+  _channels = 0;
+  for (auto& reader : _readers) {
+    int ch = reader->channels();
+    _group_offsets.push_back(_channels);
+    _group_channels.push_back(ch);
+    _channels += ch;
+  }
+  if (_channels > MAX_CHANNELS) {
+    std::fprintf(stderr, "AudioPlayer: %d canali combinati superano il massimo supportato (%d)\n",
+                 _channels, MAX_CHANNELS);
+    return false;
+  }
+
   _duration_seconds = _file_sample_rate > 0
       ? static_cast<double>(_total_frames) / _file_sample_rate : 0.0;
   _levels.channels.store(_channels, std::memory_order_relaxed);
@@ -109,12 +164,12 @@ bool AudioPlayer::open() {
   // rifiutano l'apertura dello stream con un numero di canali diverso
   // da quello nativo. Apriamo sempre con TUTTI i canali del device, e
   // nel pa_callback scriviamo i campioni reali solo sui canali
-  // [channel_offset, channel_offset + file_channels), silenzio altrove.
+  // [channel_offset, channel_offset + channels), silenzio altrove.
   int stream_channels = info->maxOutputChannels;
 
   if (_channel_offset < 0 || _channel_offset + _channels > stream_channels) {
     if (_channel_offset != 0) {
-      std::fprintf(stderr, "AudioPlayer: channel_offset %d non valido per %d canali file / "
+      std::fprintf(stderr, "AudioPlayer: channel_offset %d non valido per %d canali combinati / "
                    "%d canali stream, uso 0\n", _channel_offset, _channels, stream_channels);
     }
     _channel_offset = 0;
@@ -122,7 +177,7 @@ bool AudioPlayer::open() {
 
   if (stream_channels < _channels + _channel_offset) {
     std::fprintf(stderr, "AudioPlayer: device ha solo %d canali di output, servirebbero %d "
-                 "(offset %d + %d canali file) — alcuni canali non verranno riprodotti\n",
+                 "(offset %d + %d canali combinati) — alcuni canali non verranno riprodotti\n",
                  stream_channels, _channel_offset + _channels, _channel_offset, _channels);
   }
 
@@ -156,6 +211,7 @@ bool AudioPlayer::open() {
 bool AudioPlayer::start() {
   if (!_stream) return false;
   _frames_played.store(0, std::memory_order_relaxed);
+  _finished_naturally.store(false, std::memory_order_relaxed);
   _reader_running.store(true, std::memory_order_relaxed);
   _state.store(State::Playing, std::memory_order_relaxed);
   _reader_thread = std::thread(&AudioPlayer::reader_thread_func, this);
@@ -198,7 +254,7 @@ void AudioPlayer::stop() {
 }
 
 void AudioPlayer::seek(double seconds) {
-  if (!_reader || _file_sample_rate <= 0) return;
+  if (_readers.empty() || _file_sample_rate <= 0) return;
 
   uint64_t frame = static_cast<uint64_t>(std::max(0.0, seconds) * _file_sample_rate);
   frame = std::min(frame, _total_frames);
@@ -210,10 +266,11 @@ void AudioPlayer::seek(double seconds) {
   _state.store(State::Paused, std::memory_order_relaxed);
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-  _reader->seek(frame);
-  // Il conteggio "frames played" avanza in unita' di frame di STREAM
-  // (post-resampling): riproiettiamo il frame di seek dal dominio file
-  // al dominio stream, cosi' la seek bar riparte dal punto corretto.
+  // Sincronizza il seek su TUTTI i file del gruppo insieme.
+  for (auto& reader : _readers) {
+    reader->seek(frame);
+  }
+
   uint64_t stream_frame = _file_sample_rate > 0
       ? static_cast<uint64_t>(frame * (static_cast<double>(_stream_sample_rate) / _file_sample_rate))
       : frame;
@@ -225,25 +282,35 @@ void AudioPlayer::seek(double seconds) {
   if (prev == State::Playing) _state.store(State::Playing, std::memory_order_relaxed);
 }
 
-void AudioPlayer::set_volume_db(float db) {
-  float clamped = std::clamp(db, -60.0f, 12.0f);
-  _volume_db.store(clamped, std::memory_order_relaxed);
-}
-
 double AudioPlayer::position_seconds() const {
   return _stream_sample_rate > 0
       ? static_cast<double>(_frames_played.load(std::memory_order_relaxed)) / _stream_sample_rate
       : 0.0;
 }
 
-void AudioPlayer::reader_thread_func() {
-  std::vector<int32_t> chunk(kChunkFrames * _channels);
-  std::vector<int32_t> resampled;  // riusato ogni iterazione, ridimensionato al bisogno
+void AudioPlayer::set_volume_db(float db) {
+  float clamped = std::clamp(db, -60.0f, 12.0f);
+  _volume_db.store(clamped, std::memory_order_relaxed);
+}
 
-  bool need_resample = (_stream_sample_rate != _file_sample_rate) && _file_sample_rate > 0;
+void AudioPlayer::reader_thread_func() {
+  size_t n = _readers.size();
+  bool single_file = (n == 1);
+  // Il resampling e' supportato solo nel caso a singolo file (vedi
+  // controllo in open() per il caso multi-file).
+  bool need_resample = single_file && (_stream_sample_rate != _file_sample_rate) &&
+                       _file_sample_rate > 0;
   double ratio = need_resample
       ? static_cast<double>(_file_sample_rate) / static_cast<double>(_stream_sample_rate)
       : 1.0;
+
+  // Un buffer di lettura grezza per ciascun file del gruppo.
+  std::vector<std::vector<int32_t>> raw_chunks(n);
+  for (size_t g = 0; g < n; ++g) {
+    raw_chunks[g].resize(kChunkFrames * static_cast<size_t>(_group_channels[g]));
+  }
+  std::vector<int32_t> combined(kChunkFrames * _channels);
+  std::vector<int32_t> resampled;  // riusato solo nel caso singolo file con resampling attivo
 
   while (_reader_running.load(std::memory_order_relaxed)) {
     if (_state.load(std::memory_order_relaxed) == State::Paused) {
@@ -251,8 +318,6 @@ void AudioPlayer::reader_thread_func() {
       continue;
     }
 
-    // Stima quanti frame di OUTPUT produrra' un chunk di kChunkFrames frame
-    // di input, per non riempire il ring oltre lo spazio disponibile.
     size_t est_output_frames = need_resample
         ? static_cast<size_t>(kChunkFrames / ratio) + 2
         : kChunkFrames;
@@ -261,7 +326,17 @@ void AudioPlayer::reader_thread_func() {
       continue;
     }
 
-    size_t got = _reader->read_samples(chunk.data(), kChunkFrames);
+    // Legge un chunk da OGNI file del gruppo, in lockstep. `got` e' il
+    // minimo tra tutti i reader: se uno dei file finisse prima degli
+    // altri (non dovrebbe capitare — sono attesi della stessa durata,
+    // essendo split della stessa registrazione — ma per sicurezza), la
+    // riproduzione del gruppo si ferma li' invece di continuare
+    // spaiata su canali diversi.
+    size_t got = kChunkFrames;
+    for (size_t g = 0; g < n; ++g) {
+      size_t got_g = _readers[g]->read_samples(raw_chunks[g].data(), kChunkFrames);
+      got = std::min(got, got_g);
+    }
     if (got == 0) {
       _reader_running.store(false, std::memory_order_relaxed);
       _finished_naturally.store(true, std::memory_order_relaxed);
@@ -269,16 +344,25 @@ void AudioPlayer::reader_thread_func() {
       break;
     }
 
+    // Interleaving: ogni gruppo scrive i propri canali nell'offset che
+    // gli compete all'interno del frame combinato.
+    for (size_t f = 0; f < got; ++f) {
+      for (size_t g = 0; g < n; ++g) {
+        int gc = _group_channels[g];
+        int off = _group_offsets[g];
+        const int32_t* src = &raw_chunks[g][f * static_cast<size_t>(gc)];
+        int32_t* dst = &combined[f * static_cast<size_t>(_channels) + static_cast<size_t>(off)];
+        std::memcpy(dst, src, static_cast<size_t>(gc) * sizeof(int32_t));
+      }
+    }
+
     if (!need_resample) {
-      _ring->write(chunk.data(), got * _channels);
+      _ring->write(combined.data(), got * static_cast<size_t>(_channels));
       continue;
     }
 
-    // Resampling lineare: `pos` e' la posizione frazionaria (in frame del
-    // FILE) del prossimo campione da interpolare, in [0, ratio) all'inizio
-    // di ogni chunk (il resto viene riportato dal chunk precedente in
-    // _resample_pos). Genera campioni finche' pos rimane dentro al chunk
-    // corrente; l'avanzo frazionario viene salvato per il prossimo giro.
+    // Resampling lineare (solo caso singolo file, n==1, quindi
+    // _channels == _group_channels[0] — stessa logica di sempre).
     resampled.clear();
     double pos = _resample_pos;
     while (pos < static_cast<double>(got)) {
@@ -286,8 +370,8 @@ void AudioPlayer::reader_thread_func() {
       size_t i1 = std::min(i0 + 1, got - 1);
       double frac = pos - static_cast<double>(i0);
       for (int c = 0; c < _channels; ++c) {
-        int32_t s0 = chunk[i0 * _channels + c];
-        int32_t s1 = chunk[i1 * _channels + c];
+        int32_t s0 = combined[i0 * static_cast<size_t>(_channels) + static_cast<size_t>(c)];
+        int32_t s1 = combined[i1 * static_cast<size_t>(_channels) + static_cast<size_t>(c)];
         double v = s0 + (s1 - s0) * frac;
         resampled.push_back(static_cast<int32_t>(v));
       }
@@ -305,22 +389,19 @@ int AudioPlayer::pa_callback(const void*, void* output, unsigned long frame_coun
                              const void*, unsigned long, void* user_data) {
   auto* ctx = static_cast<CallbackContext*>(user_data);
   auto* out = static_cast<int32_t*>(output);
-  int file_ch = ctx->file_channels;
+  int file_ch = ctx->file_channels;  // larghezza TOTALE combinata (uno o piu' file)
   int stream_ch = ctx->stream_channels;
   int offset = ctx->channel_offset;
 
   // Silenzio su tutto il buffer di output prima di riempirlo: copre sia
   // gli under-run (dati mancanti dal ring) sia i canali "extra" oltre
-  // [offset, offset+file_ch) che il device richiede ma il file non usa.
+  // [offset, offset+file_ch) che il device richiede ma il gruppo non usa.
   std::memset(out, 0, static_cast<size_t>(frame_count) * stream_ch * sizeof(int32_t));
 
   // In pausa: silenzio immediato (gia' scritto sopra) e usciamo SENZA
   // leggere dal ring buffer. Il reader thread nel frattempo smette di
-  // riempirlo (vedi reader_thread_func), quindi il contenuto gia'
-  // pre-caricato resta congelato — alla ripresa si riparte esattamente
-  // da li', senza salti in avanti ne' click. Se invece continuassimo a
-  // drenare il ring anche in pausa, si sentirebbe ancora l'audio gia'
-  // bufferizzato (fino a ~1s) prima del silenzio effettivo.
+  // riempirlo, quindi il contenuto gia' pre-caricato resta congelato —
+  // alla ripresa si riparte esattamente da li', senza salti ne' click.
   AudioPlayer::State st = ctx->state ? ctx->state->load(std::memory_order_relaxed)
                                      : AudioPlayer::State::Playing;
   if (st == AudioPlayer::State::Paused) {

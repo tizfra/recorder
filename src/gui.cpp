@@ -9,13 +9,18 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <csignal>
 #include <filesystem>
+#include <fstream>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "audio_player.h"
@@ -30,6 +35,144 @@ namespace recorder {
 static std::atomic<bool> g_gui_running{true};
 static void gui_signal_handler(int) { g_gui_running.store(false, std::memory_order_relaxed); }
 
+// Confronto "naturale" tra due stringhe: i blocchi numerici vengono
+// confrontati come numeri (quindi "take2" < "take10"), non carattere per
+// carattere come farebbe l'ordinamento alfabetico puro (che metterebbe
+// "take10" prima di "take2"). Usato per ordinare file/cartelle nel
+// browser di riproduzione — da cui derivano anche l'ordine della
+// playlist e di Prev/Next.
+static bool natural_less(const std::string& a, const std::string& b) {
+  size_t i = 0, j = 0;
+  while (i < a.size() && j < b.size()) {
+    if (std::isdigit(static_cast<unsigned char>(a[i])) &&
+        std::isdigit(static_cast<unsigned char>(b[j]))) {
+      size_t i0 = i, j0 = j;
+      while (i < a.size() && std::isdigit(static_cast<unsigned char>(a[i]))) ++i;
+      while (j < b.size() && std::isdigit(static_cast<unsigned char>(b[j]))) ++j;
+      std::string num_a = a.substr(i0, i - i0);
+      std::string num_b = b.substr(j0, j - j0);
+      // Toglie gli zeri iniziali solo per il confronto numerico (es.
+      // "007" e "7" valgono lo stesso qui), il testo originale resta
+      // intatto per il resto del confronto.
+      size_t na = num_a.find_first_not_of('0');
+      size_t nb = num_b.find_first_not_of('0');
+      std::string trimmed_a = na == std::string::npos ? "0" : num_a.substr(na);
+      std::string trimmed_b = nb == std::string::npos ? "0" : num_b.substr(nb);
+      if (trimmed_a.size() != trimmed_b.size()) return trimmed_a.size() < trimmed_b.size();
+      if (trimmed_a != trimmed_b) return trimmed_a < trimmed_b;
+      continue;  // blocco numerico uguale: confronta il resto della stringa
+    }
+    if (a[i] != b[j]) return a[i] < b[j];
+    ++i;
+    ++j;
+  }
+  return (a.size() - i) < (b.size() - j);
+}
+
+// Riconosce il pattern "<base>_chNN-MM.<ext>" generato dallo split FLAC
+// multicanale (vedi make_channel_suffixed_filename in recorder.cpp).
+// Ritorna true e popola base/ext/first_ch se il nome file combacia.
+static bool parse_channel_group_filename(const std::string& filename, std::string& base,
+                                         std::string& ext, int& first_ch) {
+  auto dot = filename.rfind('.');
+  if (dot == std::string::npos) return false;
+  ext = filename.substr(dot);
+  std::string stem = filename.substr(0, dot);
+
+  auto ch_pos = stem.rfind("_ch");
+  if (ch_pos == std::string::npos) return false;
+  std::string suffix = stem.substr(ch_pos + 3);  // "NN-MM" (o "NN-MM_PP-QQ..." per selezioni
+                                                  // non contigue: qui basta il primo blocco)
+  auto dash = suffix.find('-');
+  if (dash == std::string::npos) return false;
+  std::string first_str = suffix.substr(0, dash);
+  if (first_str.empty() ||
+      !std::all_of(first_str.begin(), first_str.end(),
+                   [](unsigned char c) { return std::isdigit(c); })) {
+    return false;
+  }
+
+  base = stem.substr(0, ch_pos);
+  first_ch = std::stoi(first_str);
+  return true;
+}
+
+// Una voce selezionabile nel browser di riproduzione: quasi sempre un
+// singolo file, ma se il raggruppamento e' attivo puo' rappresentare
+// PIU' file da riprodurre sincronizzati insieme (uno split FLAC a N
+// canali diviso in file da max 8 canali ciascuno per limite di formato —
+// qualsiasi N, non solo 4: 2 file da 16ch, 3 da 8+8+8, ecc.).
+struct PlaybackEntry {
+  std::vector<std::string> files;  // percorsi completi, ordinati per canale crescente
+  std::string display_name;
+};
+
+// Raggruppa playback_files in voci PlaybackEntry. Se grouping_enabled e'
+// false, ogni file resta una voce a se stante (comportamento di sempre).
+// Se true, i file che condividono lo stesso "<base>.<ext>" col pattern
+// "_chNN-MM" vengono uniti in un'unica voce riproducibile insieme;
+// gruppi di un solo file restano trattati come file singoli.
+static std::vector<PlaybackEntry> group_playback_files(const std::vector<std::string>& files,
+                                                        bool grouping_enabled) {
+  std::vector<PlaybackEntry> entries;
+
+  if (!grouping_enabled) {
+    for (auto& f : files) {
+      PlaybackEntry e;
+      e.files = {f};
+      e.display_name = std::filesystem::path(f).filename().string();
+      entries.push_back(std::move(e));
+    }
+    return entries;
+  }
+
+  std::map<std::string, std::vector<std::pair<int, std::string>>> groups;  // "base|ext" -> [(first_ch, path)]
+  std::vector<std::string> standalone;
+
+  for (auto& f : files) {
+    std::string filename = std::filesystem::path(f).filename().string();
+    std::string base, ext;
+    int first_ch = 0;
+    if (parse_channel_group_filename(filename, base, ext, first_ch)) {
+      groups[base + "|" + ext].emplace_back(first_ch, f);
+    } else {
+      standalone.push_back(f);
+    }
+  }
+
+  for (auto& [key, members] : groups) {
+    if (members.size() < 2) {
+      // Un solo file con quel pattern: nessun gruppo da fare, trattalo
+      // come file singolo (es. un file gia' entro il limite canali che
+      // per qualche motivo ha comunque un suffisso _chNN-MM nel nome).
+      standalone.push_back(members[0].second);
+      continue;
+    }
+    auto sorted_members = members;
+    std::sort(sorted_members.begin(), sorted_members.end());  // per first_ch crescente
+
+    PlaybackEntry e;
+    for (auto& [ch, path] : sorted_members) e.files.push_back(path);
+    std::string base = key.substr(0, key.find('|'));
+    std::string base_name = std::filesystem::path(base).filename().string();
+    e.display_name = base_name + " [" + std::to_string(sorted_members.size()) + " files]";
+    entries.push_back(std::move(e));
+  }
+
+  for (auto& f : standalone) {
+    PlaybackEntry e;
+    e.files = {f};
+    e.display_name = std::filesystem::path(f).filename().string();
+    entries.push_back(std::move(e));
+  }
+
+  std::sort(entries.begin(), entries.end(), [](const PlaybackEntry& a, const PlaybackEntry& b) {
+    return natural_less(a.display_name, b.display_name);
+  });
+
+  return entries;
+}
+
 static void format_time(double seconds, char* buf, size_t len) {
   int total = static_cast<int>(seconds);
   int h = total / 3600;
@@ -40,6 +183,44 @@ static void format_time(double seconds, char* buf, size_t len) {
   } else {
     std::snprintf(buf, len, "%02d:%02d", m, s);
   }
+}
+
+// Legge la temperatura della CPU dal sysfs standard Linux (millesimi di
+// grado in /sys/class/thermal/thermal_zone0/temp — su Raspberry Pi
+// corrisponde alla temperatura del SoC). Ritorna -1 se il file non
+// esiste o non e' leggibile (es. eseguito su un sistema diverso).
+static float read_cpu_temp_c() {
+  std::ifstream f("/sys/class/thermal/thermal_zone0/temp");
+  if (!f) return -1.0f;
+  int millidegrees = 0;
+  f >> millidegrees;
+  if (!f) return -1.0f;
+  return millidegrees / 1000.0f;
+}
+
+// Legge RAM usata/totale da /proc/meminfo (standard Linux). "Usata" e'
+// calcolata come MemTotal - MemAvailable (MemAvailable tiene gia' conto
+// di cache/buffer riutilizzabili, e' la stima piu' vicina a "quanto e'
+// realmente disponibile" rispetto a MemFree da solo). Ritorna false se
+// il file non e' leggibile o manca uno dei due campi.
+static bool read_ram_usage_mb(long& used_mb, long& total_mb) {
+  std::ifstream f("/proc/meminfo");
+  if (!f) return false;
+
+  long mem_total_kb = -1, mem_available_kb = -1;
+  std::string key;
+  long value;
+  std::string unit;
+  while (f >> key >> value >> unit) {
+    if (key == "MemTotal:") mem_total_kb = value;
+    else if (key == "MemAvailable:") mem_available_kb = value;
+    if (mem_total_kb >= 0 && mem_available_kb >= 0) break;
+  }
+  if (mem_total_kb < 0 || mem_available_kb < 0) return false;
+
+  total_mb = mem_total_kb / 1024;
+  used_mb = (mem_total_kb - mem_available_kb) / 1024;
+  return true;
 }
 
 // Disegna i VU meter verticali per i canali disponibili nell'area del
@@ -149,16 +330,31 @@ int run_gui(const Config& config) {
   auto create_window = [&]() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);  // niente barra del titolo/bordi
+    // Su Wayland questo hint da solo spesso non basta: molti compositor
+    // (labwc incluso) disegnano le decorazioni lato server per default,
+    // e vanno disattivate con una regola nella LORO configurazione (vedi
+    // ~/.config/labwc/rc.xml), non solo richieste dal client. Impostiamo
+    // qui un app_id esplicito cosi' quella regola puo' riferirsi
+    // all'app con certezza, invece di indovinare dal titolo (che include
+    // il suffisso di versione ed e' quindi meno affidabile da abbinare).
+    if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
+      glfwWindowHintString(GLFW_WAYLAND_APP_ID, "audio-recorder");
+    }
     GLFWmonitor* primary = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
     if (mode) {
       // Finestra grande quanto lo schermo ma NON fullscreen esclusivo
-      // (nullptr al posto di `primary`): resta gestita dal window
-      // manager, quindi compare sempre e puo' essere minimizzata anche
-      // senza la barra del titolo (glfwIconifyWindow non dipende dai
-      // controlli di decorazione, funziona comunque via bottone Desktop).
+      // (nullptr al posto di `primary`): stesso risultato visivo (senza
+      // decorazioni, riempie tutto lo schermo), ma evita lo stato
+      // "fullscreen" del protocollo Wayland (xdg_toplevel_set_fullscreen).
+      // Su labwc quello stato ha una gestione piu' delicata nella
+      // transizione minimizza/ripristina — con l'esclusivo si osservava
+      // un ripristino non sempre affidabile al primo tocco dopo aver
+      // premuto Desktop. Una finestra normale (anche se grande quanto lo
+      // schermo) segue invece il percorso di minimize/restore standard,
+      // il piu' testato in assoluto in qualsiasi compositor.
       return glfwCreateWindow(mode->width, mode->height, "Audio Recorder " RECORDER_VERSION, nullptr, nullptr);
     }
     return glfwCreateWindow(640, 360, "Audio Recorder " RECORDER_VERSION, nullptr, nullptr);
@@ -167,12 +363,19 @@ int run_gui(const Config& config) {
 
   // On some systems (Pi), the first window after boot doesn't render.
   // Create and destroy a throwaway window to prime the GPU/compositor.
-  GLFWwindow* warmup = create_window();
+  // Deve essere una finestra piccola e NORMALE (non fullscreen): usare
+  // create_window() qui farebbe scattare due richieste di fullscreen
+  // esclusivo consecutive all'avvio (una per il warmup, una per la
+  // finestra vera), confondendo il window manager e facendo partire
+  // l'app gia' minimizzata invece che in primo piano.
+  glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+  GLFWwindow* warmup = glfwCreateWindow(64, 64, "warmup", nullptr, nullptr);
   if (warmup) {
     glfwMakeContextCurrent(warmup);
     glfwSwapBuffers(warmup);
     glfwDestroyWindow(warmup);
   }
+  glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);  // ripristina il default per la finestra vera
 
   GLFWwindow* window = create_window();
   if (!window) {
@@ -182,6 +385,13 @@ int run_gui(const Config& config) {
   }
   glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
+  // Con GLFW compilato per Wayland nativo (vedi CMakeLists.txt,
+  // GLFW_BUILD_WAYLAND), il compositor (labwc) mette a fuoco
+  // automaticamente una finestra appena mappata — su Wayland questa
+  // chiamata e' quindi un no-op innocuo. La lasciamo solo come rete di
+  // sicurezza nel caso il binario venga eseguito in una sessione X11
+  // pura (dove invece l'effetto e' reale).
+  glfwFocusWindow(window);
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
@@ -272,6 +482,16 @@ int run_gui(const Config& config) {
   // Track current USB disk path
   std::string current_usb_disk = find_usb_disk();
   std::string output_basename = std::filesystem::path(active_config.output_file_base).filename().string();
+  // Inizializza subito il path di output in base allo stato USB rilevato
+  // ORA, non solo quando lo stato cambia in seguito (hot-plug) o quando
+  // si preme Record: se la USB era gia' inserita all'avvio, senza questa
+  // riga la GUI mostrerebbe il path di default (locale) finche' non
+  // scatta un altro evento — pur registrando comunque nel posto giusto,
+  // dato che il bottone Record ricalcola active_config.output_file al
+  // momento della pressione usando current_usb_disk (gia' corretto).
+  active_config.output_file =
+      unique_filename(current_usb_disk.empty() ? output_basename
+                                                : current_usb_disk + "/" + output_basename);
 
   float split_minutes = static_cast<float>(active_config.split_seconds / 60.0);
 
@@ -316,6 +536,14 @@ int run_gui(const Config& config) {
   std::unique_ptr<AudioPlayer> player;
   std::vector<std::string> playback_files;
   std::vector<std::string> playback_subdirs;
+  // Voci effettivamente mostrate/selezionabili nel browser: derivate da
+  // playback_files, eventualmente raggruppando insieme gli split FLAC
+  // multicanale (vedi group_playback_files). selected_file_idx e tutta
+  // la logica di Play/Prev/Next/playlist lavorano su QUESTA lista, non
+  // direttamente su playback_files.
+  std::vector<PlaybackEntry> playback_entries;
+  bool group_split_files = false;  // checkbox "Group split files"; off di default
+  bool group_split_files_prev = false;  // per rilevare il cambio e ricalcolare subito
   // Cartella attualmente sfogliata. Inizializzata sulla radice (la USB
   // se presente, altrimenti la cartella locale) e aggiornata quando si
   // naviga tra sottocartelle o quando la USB viene inserita/rimossa.
@@ -329,6 +557,14 @@ int run_gui(const Config& config) {
   // AudioPlayer): di default -5dB, come richiesto per attenuare gli MP3
   // che spesso arrivano al mixer piu' "caldi" delle registrazioni dirette.
   float playback_volume_db = -5.0f;
+  // Stato della seek bar, persistente tra un frame e l'altro: mentre
+  // seek_dragging e' true (utente sta trascinando lo slider), il valore
+  // NON viene piu' sovrascritto dalla posizione reale di riproduzione —
+  // altrimenti ogni frame la resetterebbe al punto attuale, dando
+  // l'impressione che lo slider "torni indietro" da solo appena rilasciato
+  // il dito, invece di seguire il trascinamento.
+  float seek_display_pos = 0.0f;
+  bool seek_dragging = false;
   int output_max_channels = query_output_channel_count(active_config.device_index);
   bool playlist_mode = false;   // checkbox: se attivo, Play avvia la riproduzione dell'intera cartella
   bool playlist_active = false; // true mentre l'auto-avanzamento e' effettivamente in corso
@@ -341,6 +577,14 @@ int run_gui(const Config& config) {
   bool remote_ok = remote.start(kRemotePort);
   std::string remote_addr_display;  // mostrato sia in console che in GUI, es. "192.168.1.23:8080"
   auto last_ip_check = std::chrono::steady_clock::now();
+
+  // Temperatura CPU, aggiornata ogni 3s (cambia lentamente, non serve
+  // rileggere il sysfs ad ogni frame).
+  float cpu_temp_c = read_cpu_temp_c();
+  auto last_temp_check = std::chrono::steady_clock::now();
+  long ram_used_mb = 0, ram_total_mb = 0;
+  bool ram_available = read_ram_usage_mb(ram_used_mb, ram_total_mb);
+
   auto refresh_remote_addr_display = [&]() {
     if (!remote_ok) {
       remote_addr_display.clear();
@@ -367,6 +611,36 @@ int run_gui(const Config& config) {
   } else {
     std::fprintf(stderr, "Controllo remoto disponibile su http://%s\n", remote_addr_display.c_str());
   }
+
+  // Salta alla voce di playback_entries all'indice dato: ferma il player
+  // corrente e, se stava effettivamente suonando (non solo selezionato/
+  // fermo), avvia subito la riproduzione della nuova voce — cosi'
+  // Prev/Next si comportano come ci si aspetta durante l'ascolto. Se la
+  // playlist e' attiva, aggiorna anche il suo indice cosi' l'auto-
+  // avanzamento continua correttamente da qui in poi. Condivisa tra i
+  // pulsanti Prev/Next della GUI locale e gli analoghi comandi remoti.
+  auto play_index = [&](int idx) {
+    if (idx < 0 || idx >= static_cast<int>(playback_entries.size())) return;
+    bool was_playing = player && (player->state() == AudioPlayer::State::Playing ||
+                                   player->state() == AudioPlayer::State::Paused);
+    if (player) {
+      player->stop();
+      player.reset();
+    }
+    selected_file_idx = idx;
+    if (playlist_active) playlist_index = idx;
+    if (was_playing) {
+      error_msg.clear();
+      player = std::make_unique<AudioPlayer>(playback_entries[idx].files,
+                                              active_config.device_index, channel_offset,
+                                              active_config.sample_rate);
+      if (!player->open() || !player->start()) {
+        error_msg = "Unable to play the file.";
+        player.reset();
+        playlist_active = false;
+      }
+    }
+  };
 
   while (!glfwWindowShouldClose(window) && g_gui_running.load(std::memory_order_relaxed)) {
     glfwWaitEventsTimeout(1.0 / 20.0);
@@ -447,6 +721,16 @@ int run_gui(const Config& config) {
       }
     }
 
+    // --- Refresh periodico della temperatura CPU e della RAM ---
+    {
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(now - last_temp_check).count() >= 3.0) {
+        last_temp_check = now;
+        cpu_temp_c = read_cpu_temp_c();
+        ram_available = read_ram_usage_mb(ram_used_mb, ram_total_mb);
+      }
+    }
+
     // --- USB disk hot-detection (runs always, not just when idle) ---
     {
       auto now = std::chrono::steady_clock::now();
@@ -514,10 +798,11 @@ int run_gui(const Config& config) {
       player->stop();
       player.reset();
       playlist_index++;
-      if (playlist_index < static_cast<int>(playback_files.size())) {
+      if (playlist_index < static_cast<int>(playback_entries.size())) {
         selected_file_idx = playlist_index;
-        player = std::make_unique<AudioPlayer>(playback_files[playlist_index], active_config.device_index,
-                                                channel_offset, active_config.sample_rate);
+        player = std::make_unique<AudioPlayer>(playback_entries[playlist_index].files,
+                                                active_config.device_index, channel_offset,
+                                                active_config.sample_rate);
         if (!player->open() || !player->start()) {
           error_msg = "Unable to play the next file in the folder.";
           player.reset();
@@ -537,8 +822,9 @@ int run_gui(const Config& config) {
       switch (cmd->type) {
         case RemoteCommandType::SwitchToRecordMode:
           gui_mode = GuiMode::Record;
-          // Il player NON viene fermato: vedi commento sull'analogo
-          // toggle locale piu' sopra nel file.
+          // Il player NON viene fermato al solo cambio vista: si ferma
+          // solo quando parte davvero una registrazione (RecordStart /
+          // bottone Record).
           if (active_config.device_index >= 0 && !monitor.running()) {
             monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
           }
@@ -588,6 +874,10 @@ int run_gui(const Config& config) {
                                                             : current_usb_disk + "/" + output_basename;
               active_config.output_file = unique_filename(base);
               monitor.stop();
+              // Breve pausa: lascia al device USB / ALSA il tempo di
+              // rilasciare davvero lo stream di output prima di aprire
+              // la cattura, riducendo residui sui canali usati in playback.
+              std::this_thread::sleep_for(std::chrono::milliseconds(80));
               rec = std::make_unique<Recorder>(active_config);
               if (!rec->open() || !rec->start()) {
                 error_msg = "Failed to start recording.";
@@ -614,16 +904,36 @@ int run_gui(const Config& config) {
           if (rec && rstate == Recorder::State::Paused) rec->resume();
           break;
         case RemoteCommandType::PlaybackPlay: {
-          std::string full_path = playback_dir + "/" + cmd->file_arg;
           playlist_active = false;
           if (player) { player->stop(); player.reset(); }
           error_msg.clear();
           channel_offset = cmd->int_arg;
-          player = std::make_unique<AudioPlayer>(full_path, active_config.device_index,
-                                                  channel_offset, active_config.sample_rate);
-          if (!player->open() || !player->start()) {
+
+          // Cerca la voce che contiene il file/id indicato (anche dentro
+          // un gruppo multi-file), cosi' da riprodurre l'intero gruppo
+          // sincronizzato se e' uno split FLAC multicanale, esattamente
+          // come fa il Play della GUI locale.
+          int found_idx = -1;
+          for (int i = 0; i < static_cast<int>(playback_entries.size()) && found_idx < 0; ++i) {
+            for (auto& f : playback_entries[i].files) {
+              if (std::filesystem::path(f).filename().string() == cmd->file_arg) {
+                found_idx = i;
+                break;
+              }
+            }
+          }
+
+          if (found_idx < 0) {
             error_msg = "Unable to play the file.";
-            player.reset();
+          } else {
+            selected_file_idx = found_idx;
+            player = std::make_unique<AudioPlayer>(playback_entries[found_idx].files,
+                                                    active_config.device_index, channel_offset,
+                                                    active_config.sample_rate);
+            if (!player->open() || !player->start()) {
+              error_msg = "Unable to play the file.";
+              player.reset();
+            }
           }
           break;
         }
@@ -631,23 +941,28 @@ int run_gui(const Config& config) {
           if (player) { player->stop(); player.reset(); }
           error_msg.clear();
           channel_offset = cmd->int_arg;
-          // Se e' stato indicato un file di partenza, cerca il suo indice
-          // nella lista corrente; altrimenti si parte dal primo file.
+          // Se e' stato indicato un file di partenza, cerca la voce che
+          // lo contiene (anche dentro un gruppo multi-file); altrimenti
+          // si parte dalla prima voce.
           int start_idx = 0;
           if (!cmd->file_arg.empty()) {
-            for (int i = 0; i < static_cast<int>(playback_files.size()); ++i) {
-              if (std::filesystem::path(playback_files[i]).filename().string() == cmd->file_arg) {
-                start_idx = i;
-                break;
+            for (int i = 0; i < static_cast<int>(playback_entries.size()); ++i) {
+              for (auto& f : playback_entries[i].files) {
+                if (std::filesystem::path(f).filename().string() == cmd->file_arg) {
+                  start_idx = i;
+                  goto found_start_idx;
+                }
               }
             }
+            found_start_idx:;
           }
-          if (start_idx < static_cast<int>(playback_files.size())) {
+          if (start_idx < static_cast<int>(playback_entries.size())) {
             playlist_active = true;
             playlist_index = start_idx;
             selected_file_idx = start_idx;
-            player = std::make_unique<AudioPlayer>(playback_files[start_idx], active_config.device_index,
-                                                    channel_offset, active_config.sample_rate);
+            player = std::make_unique<AudioPlayer>(playback_entries[start_idx].files,
+                                                    active_config.device_index, channel_offset,
+                                                    active_config.sample_rate);
             if (!player->open() || !player->start()) {
               error_msg = "Unable to play the folder.";
               player.reset();
@@ -673,6 +988,15 @@ int run_gui(const Config& config) {
           break;
         case RemoteCommandType::PlaybackSetVolume:
           playback_volume_db = std::clamp(static_cast<float>(cmd->float_arg), -24.0f, 6.0f);
+          break;
+        case RemoteCommandType::PlaybackSetGrouping:
+          group_split_files = (cmd->int_arg != 0);
+          break;
+        case RemoteCommandType::PlaybackPrev:
+          play_index(selected_file_idx - 1);
+          break;
+        case RemoteCommandType::PlaybackNext:
+          play_index(selected_file_idx + 1);
           break;
         case RemoteCommandType::Quit:
           if (rec && (rstate == Recorder::State::Recording || rstate == Recorder::State::Paused)) {
@@ -726,10 +1050,8 @@ int run_gui(const Config& config) {
     // stesso testo visibile, nessuna collisione di ID ImGui.
     if (ImGui::RadioButton("Record##mode", gui_mode == GuiMode::Record)) {
       gui_mode = GuiMode::Record;
-      // Il player NON viene piu' fermato qui: passare alla schermata
-      // Record e' solo un cambio di vista, non deve interrompere una
-      // riproduzione in corso. Si ferma solo quando parte davvero una
-      // nuova registrazione (vedi il bottone Record piu' sotto).
+      // Il player NON viene fermato al solo cambio vista: si ferma
+      // solo quando parte davvero una registrazione (bottone Record).
       if (active_config.device_index >= 0 && !monitor.running()) {
         monitor.start(active_config.device_index, active_config.channels, active_config.sample_rate);
       }
@@ -741,7 +1063,28 @@ int run_gui(const Config& config) {
     }
     if (is_recording) ImGui::EndDisabled();
 
+    if (cpu_temp_c >= 0.0f) {
+      // Soglie indicative per Raspberry Pi 4: il throttling termico
+      // scatta di norma intorno agli 80C.
+      ImVec4 temp_color = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+      if (cpu_temp_c >= 75.0f) {
+        temp_color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+      } else if (cpu_temp_c >= 65.0f) {
+        temp_color = ImVec4(1.0f, 0.75f, 0.2f, 1.0f);
+      }
+      ImGui::SameLine();
+      ImGui::TextColored(temp_color, "  CPU: %.0f\xC2\xB0" "C", cpu_temp_c);
+    }
+    if (ram_available) {
+      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  RAM: %ld/%ld MB", ram_used_mb,
+                         ram_total_mb);
+    }
+
     if (!remote_addr_display.empty()) {
+      // Riga propria (non SameLine): con piu' interfacce di rete attive
+      // l'indirizzo puo' essere lungo (piu' IP uniti da "/"), TextWrapped
+      // lo gestisce andando a capo invece di uscire dai bordi.
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.65f, 0.9f, 1.0f));
       ImGui::TextWrapped("Remote: %s", remote_addr_display.c_str());
       ImGui::PopStyleColor();
@@ -944,22 +1287,167 @@ int run_gui(const Config& config) {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.5f, 0.6f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.3f, 0.4f, 1.0f));
       if (row_button("Eject", 2, 3, btn_h)) {
-        // sync to flush writes, then unmount via udisksctl for clean desktop notification
-        std::system("sync");
-        std::string cmd = "udisksctl unmount -b $(findmnt -n -o SOURCE " + current_usb_disk +
-                           ") 2>&1 || umount " + current_usb_disk + " 2>&1";
-        FILE* p = popen(cmd.c_str(), "r");
-        if (p) {
-          char result[512] = {};
-          fgets(result, sizeof(result), p);
-          int ret = pclose(p);
-          if (ret == 0) {
-            std::fprintf(stderr, "Ejected: %s\n", current_usb_disk.c_str());
-            current_usb_disk.clear();
-            active_config.output_file = unique_filename(output_basename);
-          } else {
-            error_msg = "Eject failed: " + std::string(result);
+        // Quote per path con spazi (es. "/media/pi/My USB").
+        auto shell_quote = [](const std::string& s) {
+          std::string out = "'";
+          for (char c : s) {
+            if (c == '\'') out += "'\\''";
+            else out += c;
           }
+          out += "'";
+          return out;
+        };
+        auto trim_nl = [](std::string s) {
+          while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+          return s;
+        };
+        auto run_cmd = [&](const std::string& cmd, std::string* out_line) -> int {
+          FILE* p = popen(cmd.c_str(), "r");
+          if (!p) return -1;
+          char buf[512] = {};
+          if (fgets(buf, sizeof(buf), p) && out_line) *out_line = trim_nl(buf);
+          return pclose(p);
+        };
+
+        // Se stiamo riproducendo dalla USB, l'unmount fallirebbe (busy).
+        if (player) {
+          playlist_active = false;
+          player->stop();
+          player.reset();
+        }
+
+        // Flush pending writes before unmount.
+        std::system("sync");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        const std::string mount_path = current_usb_disk;
+        const std::string mount_q = shell_quote(mount_path);
+
+        // Risolve il block device (es. /dev/sda1) dal mount point.
+        std::string block_dev;
+        {
+          std::string line;
+          run_cmd("findmnt -n -o SOURCE " + mount_q + " 2>/dev/null", &line);
+          block_dev = line;
+        }
+
+        // 1) UNMOUNT via udisks/gvfs (mai umount grezzo).
+        // 2) POWER-OFF del drive padre = vera espulsione USB (LED off,
+        //    device non piu' esportato). Solo dopo unmount verificato.
+        int ret = -1;
+        std::string result;
+        const char* method = nullptr;
+
+        if (!block_dev.empty()) {
+          ret = run_cmd("udisksctl unmount -b " + shell_quote(block_dev) + " 2>&1", &result);
+          if (ret == 0) method = "udisksctl";
+        }
+        if (ret != 0) {
+          std::string gio_msg;
+          int gio = run_cmd("gio mount -e " + mount_q + " 2>&1", &gio_msg);
+          if (gio == 0) {
+            ret = 0;
+            result.clear();
+            method = "gio";
+          } else {
+            std::string gvfs_msg;
+            int gvfs = run_cmd("gvfs-mount -u " + mount_q + " 2>&1", &gvfs_msg);
+            if (gvfs == 0) {
+              ret = 0;
+              result.clear();
+              method = "gvfs-mount";
+            } else {
+              if (result.empty()) result = gio_msg;
+              if (result.empty()) result = gvfs_msg;
+              else if (!gio_msg.empty()) result += " / " + gio_msg;
+            }
+          }
+        }
+
+        if (ret == 0) {
+          std::string check;
+          run_cmd("findmnt -n " + mount_q + " 2>/dev/null", &check);
+          if (!check.empty()) {
+            ret = -1;
+            result = "still mounted after unmount";
+            method = nullptr;
+          }
+        }
+
+        // Parent disk for power-off (e.g. /dev/sda from /dev/sda1).
+        std::string power_dev;
+        if (ret == 0 && !block_dev.empty()) {
+          std::string pk;
+          run_cmd("lsblk -n -o PKNAME " + shell_quote(block_dev) + " 2>/dev/null", &pk);
+          if (!pk.empty()) {
+            if (pk.rfind("/dev/", 0) != 0) pk = "/dev/" + pk;
+            power_dev = pk;
+          } else {
+            power_dev = block_dev;
+          }
+        }
+
+        bool powered_off = false;
+        std::string po_msg;  // dichiarata qui (non nello scope dell'if sotto) cosi' resta
+                              // leggibile piu' in basso, dove decidiamo cosa mostrare
+        if (ret == 0) {
+          std::system("sync");
+          std::this_thread::sleep_for(std::chrono::milliseconds(400));
+          if (!power_dev.empty()) {
+            int po = run_cmd("udisksctl power-off -b " + shell_quote(power_dev) + " 2>&1",
+                             &po_msg);
+            if (po == 0) {
+              powered_off = true;
+            } else {
+              std::fprintf(stderr, "Eject: unmount ok (%s), power-off failed (%s): %s\n",
+                           method ? method : "?", power_dev.c_str(), po_msg.c_str());
+            }
+          }
+        }
+
+        if (ret == 0 && powered_off) {
+          std::fprintf(stderr, "Ejected via %s (power-off=yes): %s (part=%s drive=%s)\n",
+                       method ? method : "?", mount_path.c_str(),
+                       block_dev.empty() ? "?" : block_dev.c_str(),
+                       power_dev.empty() ? "?" : power_dev.c_str());
+          current_usb_disk.clear();
+          playback_dir = ".";
+          selected_file_idx = -1;
+          playlist_active = false;
+          active_config.output_file = unique_filename(output_basename);
+          update_disk_space();
+          error_msg.clear();
+          ImGui::OpenPopup("USB Ejected");
+        } else if (ret == 0 && !powered_off) {
+          // L'unmount e' riuscito (il filesystem e' scritto/pulito, puoi
+          // navigare altrove senza perdita dati), ma il power-off USB e'
+          // fallito: il device resta acceso/autorizzato a livello bus.
+          // Scollegarlo ORA equivale comunque a una rimozione non pulita
+          // dal punto di vista del sistema — meglio dirlo chiaramente
+          // invece di mostrare un falso "espulso con successo".
+          std::fprintf(stderr, "Eject: unmount ok (%s) ma power-off fallito (%s): %s\n",
+                       method ? method : "?", power_dev.empty() ? "?" : power_dev.c_str(),
+                       po_msg.c_str());
+          current_usb_disk.clear();
+          playback_dir = ".";
+          selected_file_idx = -1;
+          playlist_active = false;
+          active_config.output_file = unique_filename(output_basename);
+          update_disk_space();
+          std::string reason = power_dev.empty()
+              ? "couldn't identify the parent USB device"
+              : (po_msg.empty() ? "unknown error" : po_msg);
+          error_msg = "Unmounted OK, but couldn't power off the USB device (" + reason +
+                     "). Data is safe, but wait a moment or check permissions before unplugging.";
+        } else {
+          std::string msg = result.empty() ? "unknown error" : result;
+          if (msg.find("Not authorized") != std::string::npos ||
+              msg.find("not authorized") != std::string::npos ||
+              msg.find("Permission denied") != std::string::npos ||
+              msg.find("permission denied") != std::string::npos) {
+            msg += " (need user session with udisks/polkit; check DBUS_SESSION_BUS_ADDRESS)";
+          }
+          error_msg = "Eject failed: " + msg;
         }
       }
       ImGui::PopStyleColor(3);
@@ -1032,6 +1520,18 @@ int run_gui(const Config& config) {
         ImGui::EndPopup();
       }
 
+      // Shown after a successful USB eject (unmount).
+      if (ImGui::BeginPopupModal("USB Ejected", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("The USB drive was ejected successfully.");
+        ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f),
+                           "It is now safe to unplug the USB drive.");
+        ImGui::Spacing();
+        if (ImGui::Button("OK", ImVec2(160, 0))) {
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+      }
+
       // --- VU Meters ---
       ImGui::Spacing();
       LevelData* lvl = nullptr;
@@ -1047,6 +1547,7 @@ int run_gui(const Config& config) {
 
       // Rescan (sottocartelle + file audio) ogni 2s, o immediatamente
       // quando si e' appena navigato in una cartella diversa.
+      bool entries_dirty = false;
       {
         auto now = std::chrono::steady_clock::now();
         bool dir_changed = (playback_dir != last_scanned_dir);
@@ -1066,10 +1567,21 @@ int run_gui(const Config& config) {
               }
             }
           }
-          std::sort(playback_subdirs.begin(), playback_subdirs.end());
-          std::sort(playback_files.begin(), playback_files.end());
+          std::sort(playback_subdirs.begin(), playback_subdirs.end(), natural_less);
+          std::sort(playback_files.begin(), playback_files.end(), natural_less);
           if (dir_changed) selected_file_idx = -1;
+          entries_dirty = true;
         }
+      }
+      // Ricalcola anche se la checkbox di raggruppamento e' appena
+      // cambiata, senza aspettare il prossimo rescan periodico.
+      if (group_split_files != group_split_files_prev) {
+        group_split_files_prev = group_split_files;
+        entries_dirty = true;
+        selected_file_idx = -1;  // gli indici cambiano significato tra le due modalita'
+      }
+      if (entries_dirty) {
+        playback_entries = group_playback_files(playback_files, group_split_files);
       }
 
       if (!error_msg.empty()) {
@@ -1115,9 +1627,8 @@ int run_gui(const Config& config) {
         }
       }
 
-      for (int i = 0; i < static_cast<int>(playback_files.size()); ++i) {
-        std::string label = std::filesystem::path(playback_files[i]).filename().string();
-        if (ImGui::Selectable(label.c_str(), selected_file_idx == i)) {
+      for (int i = 0; i < static_cast<int>(playback_entries.size()); ++i) {
+        if (ImGui::Selectable(playback_entries[i].display_name.c_str(), selected_file_idx == i)) {
           selected_file_idx = i;
           playlist_active = false;
           if (player) {
@@ -1165,6 +1676,17 @@ int run_gui(const Config& config) {
       }
       if (is_playing_state) ImGui::EndDisabled();
 
+      ImGui::SameLine();
+      if (ImGui::Checkbox("Group split files", &group_split_files)) {
+        // group_split_files_prev viene confrontato piu' sotto nel loop
+        // per rilevare il cambio e ricalcolare playback_entries subito,
+        // senza aspettare il prossimo rescan periodico.
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Plays multi-file FLAC splits (e.g. 4 files x 8ch) together in sync,\n"
+                          "as if they were one recording.");
+      }
+
       // Il volume, a differenza del canale di uscita, si puo' cambiare
       // liberamente anche durante la riproduzione: il guadagno si applica
       // in tempo reale nel callback audio, senza bisogno di fermare o
@@ -1179,8 +1701,17 @@ int run_gui(const Config& config) {
       ImGui::Checkbox("Play entire folder", &playlist_mode);
       if (is_playing_state) ImGui::EndDisabled();
 
-      // --- Buttons, riga 1: Play/Pause/Resume, Stop ---
-      bool has_selection = selected_file_idx >= 0 && selected_file_idx < static_cast<int>(playback_files.size());
+      // --- Buttons, riga 1: Prev, Play/Pause/Resume, Next, Stop ---
+      bool has_selection = selected_file_idx >= 0 && selected_file_idx < static_cast<int>(playback_entries.size());
+      bool has_prev = selected_file_idx > 0;
+      bool has_next = selected_file_idx >= 0 &&
+                      selected_file_idx + 1 < static_cast<int>(playback_entries.size());
+
+      if (!has_prev) ImGui::BeginDisabled();
+      if (row_button("Prev", 0, 4, btn_h)) {
+        play_index(selected_file_idx - 1);
+      }
+      if (!has_prev) ImGui::EndDisabled();
 
       if (!has_selection) ImGui::BeginDisabled();
       if (!player || player->state() == AudioPlayer::State::Stopped ||
@@ -1188,11 +1719,11 @@ int run_gui(const Config& config) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
-        if (row_button("Play", 0, 2, btn_h)) {
+        if (row_button("Play", 1, 4, btn_h)) {
           error_msg.clear();
           playlist_active = playlist_mode;
           playlist_index = selected_file_idx;
-          player = std::make_unique<AudioPlayer>(playback_files[selected_file_idx],
+          player = std::make_unique<AudioPlayer>(playback_entries[selected_file_idx].files,
                                                   active_config.device_index, channel_offset,
                                                   active_config.sample_rate);
           if (!player->open() || !player->start()) {
@@ -1206,22 +1737,28 @@ int run_gui(const Config& config) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.6f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.5f, 0.05f, 1.0f));
-        if (row_button("Pause", 0, 2, btn_h)) player->pause();
+        if (row_button("Pause", 1, 4, btn_h)) player->pause();
         ImGui::PopStyleColor(3);
       } else if (player->state() == AudioPlayer::State::Paused) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
-        if (row_button("Resume", 0, 2, btn_h)) player->resume();
+        if (row_button("Resume", 1, 4, btn_h)) player->resume();
         ImGui::PopStyleColor(3);
       }
       if (!has_selection) ImGui::EndDisabled();
+
+      if (!has_next) ImGui::BeginDisabled();
+      if (row_button("Next", 2, 4, btn_h)) {
+        play_index(selected_file_idx + 1);
+      }
+      if (!has_next) ImGui::EndDisabled();
 
       if (!is_playing_state) ImGui::BeginDisabled();
       ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.25f, 0.25f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
-      if (row_button("Stop", 1, 2, btn_h)) {
+      if (row_button("Stop", 3, 4, btn_h)) {
         playlist_active = false;
         player->stop();
         player.reset();
@@ -1269,18 +1806,22 @@ int run_gui(const Config& config) {
 
       // Seek bar
       if (player) {
-        float pos = static_cast<float>(player->position_seconds());
+        if (!seek_dragging) {
+          seek_display_pos = static_cast<float>(player->position_seconds());
+        }
         float dur = static_cast<float>(player->duration_seconds());
         char t1[16], t2[16];
-        format_time(pos, t1, sizeof(t1));
+        format_time(seek_display_pos, t1, sizeof(t1));
         format_time(dur, t2, sizeof(t2));
         ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("##seek", &pos, 0.0f, dur > 0.0f ? dur : 1.0f, "");
+        ImGui::SliderFloat("##seek", &seek_display_pos, 0.0f, dur > 0.0f ? dur : 1.0f, "");
+        seek_dragging = ImGui::IsItemActive();
         if (ImGui::IsItemDeactivatedAfterEdit()) {
-          player->seek(pos);
+          player->seek(seek_display_pos);
         }
         ImGui::Text("%s / %s", t1, t2);
       } else {
+        seek_dragging = false;
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a file and press Play");
       }
@@ -1320,8 +1861,9 @@ int run_gui(const Config& config) {
       st.has_input_device = !selected_device_name.empty();
       st.input_device_name = selected_device_name;
 
-      for (auto& f : playback_files) {
-        st.playback_files.push_back(std::filesystem::path(f).filename().string());
+      for (auto& entry : playback_entries) {
+        st.playback_files.push_back(entry.display_name);
+        st.playback_file_ids.push_back(std::filesystem::path(entry.files.front()).filename().string());
       }
       for (auto& d : playback_subdirs) {
         st.playback_subdirs.push_back(std::filesystem::path(d).filename().string());
@@ -1333,8 +1875,8 @@ int run_gui(const Config& config) {
         st.playback_current_dir = (!ec && rel.string() != ".") ? "/" + rel.string() : "/";
         st.playback_can_go_up = (playback_dir != root);
       }
-      if (selected_file_idx >= 0 && selected_file_idx < static_cast<int>(playback_files.size())) {
-        st.playback_current_file = std::filesystem::path(playback_files[selected_file_idx]).filename().string();
+      if (selected_file_idx >= 0 && selected_file_idx < static_cast<int>(playback_entries.size())) {
+        st.playback_current_file = playback_entries[selected_file_idx].display_name;
       }
       if (player) {
         switch (player->state()) {
@@ -1356,6 +1898,10 @@ int run_gui(const Config& config) {
       st.output_max_channels = output_max_channels;
       st.playlist_active = playlist_active;
       st.playback_volume_db = playback_volume_db;
+      st.playback_group_split_files = group_split_files;
+      st.cpu_temp_c = cpu_temp_c;
+      st.ram_used_mb = ram_used_mb;
+      st.ram_total_mb = ram_available ? ram_total_mb : 0;
 
       st.error_message = error_msg;
       st.disk_space = disk_space_str;

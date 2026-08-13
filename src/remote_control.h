@@ -28,6 +28,9 @@ enum class RemoteCommandType {
   PlaybackResume,
   PlaybackSeek,       // usa float_arg = secondi
   PlaybackSetVolume,  // usa float_arg = dB (-24..+6)
+  PlaybackSetGrouping,  // usa int_arg = 0/1 (disattiva/attiva 'Group split files')
+  PlaybackPrev,       // salta alla voce precedente nel browser corrente
+  PlaybackNext,       // salta alla voce successiva nel browser corrente
   SwitchToRecordMode,
   SwitchToPlaybackMode,
   Quit,
@@ -54,7 +57,11 @@ struct RemoteStatus {
   bool has_input_device = false;
   std::string input_device_name;
 
-  std::vector<std::string> playback_files;   // nomi file (senza path) nella cartella corrente
+  std::vector<std::string> playback_files;   // nomi da mostrare (per i gruppi: "base [N files]")
+  std::vector<std::string> playback_file_ids;  // stesso ordine di playback_files: nome del primo
+                                                // file di ciascuna voce, usato per selezionarla/
+                                                // riprodurla (identifica la voce anche se e' un
+                                                // gruppo multi-file)
   std::vector<std::string> playback_subdirs; // nomi sottocartelle (senza path) nella cartella corrente
   std::string playback_current_dir;          // percorso corrente relativo alla radice, es. "/" o "/Live/2024"
   bool playback_can_go_up = false;           // true se non si e' gia' alla radice
@@ -62,6 +69,10 @@ struct RemoteStatus {
   std::string playback_state;     // "idle" | "playing" | "paused" | "stopped"
   double playback_position = 0.0;
   float playback_volume_db = -5.0f;
+  bool playback_group_split_files = false;
+  float cpu_temp_c = -1.0f;  // -1 = non disponibile (es. non e' un Raspberry Pi)
+  long ram_used_mb = 0;
+  long ram_total_mb = 0;
   double playback_duration = 0.0;
   int playback_channels = 0;
   int playback_channel_offset = 0;

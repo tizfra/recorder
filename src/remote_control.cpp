@@ -51,6 +51,12 @@ std::string status_to_json(const RemoteStatus& s) {
     j << "\"" << json_escape(s.playback_files[i]) << "\"";
   }
   j << "],";
+  j << "\"playback_file_ids\":[";
+  for (size_t i = 0; i < s.playback_file_ids.size(); ++i) {
+    if (i > 0) j << ",";
+    j << "\"" << json_escape(s.playback_file_ids[i]) << "\"";
+  }
+  j << "],";
   j << "\"playback_subdirs\":[";
   for (size_t i = 0; i < s.playback_subdirs.size(); ++i) {
     if (i > 0) j << ",";
@@ -63,6 +69,10 @@ std::string status_to_json(const RemoteStatus& s) {
   j << "\"playback_state\":\"" << json_escape(s.playback_state) << "\",";
   j << "\"playback_position\":" << s.playback_position << ",";
   j << "\"playback_volume_db\":" << s.playback_volume_db << ",";
+  j << "\"playback_group_split_files\":" << (s.playback_group_split_files ? "true" : "false") << ",";
+  j << "\"cpu_temp_c\":" << s.cpu_temp_c << ",";
+  j << "\"ram_used_mb\":" << s.ram_used_mb << ",";
+  j << "\"ram_total_mb\":" << s.ram_total_mb << ",";
   j << "\"playback_duration\":" << s.playback_duration << ",";
   j << "\"playback_channels\":" << s.playback_channels << ",";
   j << "\"playback_channel_offset\":" << s.playback_channel_offset << ",";
@@ -177,13 +187,23 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
   <div class="row">
     <select id="channelSelect"></select>
   </div>
+  <div class="row" style="align-items:center">
+    <label style="display:flex; align-items:center; gap:6px; color:#ccc; font-size:0.9em">
+      <input type="checkbox" id="groupSplitFiles" onchange="setGrouping(this.checked)">
+      Group split files
+    </label>
+  </div>
   <div class="row">
     <button class="go" onclick="playSelected()">▶ Play</button>
     <button class="go" onclick="playFolder()">▶▶ Entire Folder</button>
   </div>
   <div class="row">
+    <button onclick="cmd('playback_prev')">⏮ Prev</button>
     <button onclick="cmd('playback_pause')">Pause</button>
     <button onclick="cmd('playback_resume')">Resume</button>
+    <button onclick="cmd('playback_next')">Next ⏭</button>
+  </div>
+  <div class="row">
     <button class="stop" onclick="cmd('playback_stop')">■ Stop</button>
   </div>
 </div>
@@ -195,11 +215,14 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
   </div>
 </div>
 
+<div class="status-line" id="tempLine" style="color:#888"></div>
 <div class="error" id="errorLine"></div>
 
 <script>
 let selectedFile = null;
 let currentMode = null;  // ultima modalita' nota dall'app, evita comandi ridondanti da refresh()
+let modeSyncSuppressUntil = 0;  // timestamp: finche' non e' passato, ignora la modalita' letta
+                                 // dal server (vedi setMode)
 
 // Aggiorna solo la UI (tab attiva, pannello visibile), senza inviare
 // nessun comando: usata sia da setMode() (dopo un click) sia da
@@ -215,6 +238,13 @@ function applyMode(mode) {
 
 function setMode(mode) {
   applyMode(mode);
+  // Il comando appena inviato impiega fino a ~300ms per essere davvero
+  // applicato lato app (loop a ~50ms + eventuale retry di rete). Se nel
+  // frattempo un refresh (periodico o quello dopo il comando) legge lo
+  // stato VECCHIO, senza questa protezione la tab scatterebbe indietro
+  // per poi tornare avanti al refresh successivo — e' lo "scatto" che si
+  // vede. 700ms di margine sono ampiamente sufficienti al caso peggiore.
+  modeSyncSuppressUntil = Date.now() + 700;
   cmd(mode === 'record' ? 'mode_record' : 'mode_playback');
 }
 
@@ -275,6 +305,10 @@ function setVolume(value) {
   cmd('playback_volume', {db: parseFloat(value)});
 }
 
+function setGrouping(enabled) {
+  cmd('playback_grouping', {enabled: enabled ? 1 : 0});
+}
+
 function fmtTime(s) {
   s = Math.floor(s);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -287,7 +321,7 @@ async function refresh() {
     const res = await fetch('/api/status');
     const st = await res.json();
 
-    if (st.mode && st.mode !== currentMode) {
+    if (st.mode && st.mode !== currentMode && Date.now() >= modeSyncSuppressUntil) {
       applyMode(st.mode);
     }
 
@@ -298,6 +332,19 @@ async function refresh() {
       (st.playback_current_file ? `  ${st.playback_current_file}` : '') +
       (st.playlist_active ? '  [folder]' : '');
     document.getElementById('errorLine').textContent = st.error_message || '';
+
+    const tempLine = document.getElementById('tempLine');
+    let tempText = '';
+    if (st.cpu_temp_c >= 0) {
+      tempText = 'CPU: ' + Math.round(st.cpu_temp_c) + '°C';
+      tempLine.style.color = st.cpu_temp_c >= 75 ? '#e66' : (st.cpu_temp_c >= 65 ? '#eb2' : '#888');
+    } else {
+      tempLine.style.color = '#888';
+    }
+    if (st.ram_total_mb > 0) {
+      tempText += (tempText ? '   ' : '') + 'RAM: ' + st.ram_used_mb + '/' + st.ram_total_mb + ' MB';
+    }
+    tempLine.textContent = tempText;
     document.getElementById('pathLine').textContent = st.playback_current_dir || '/';
 
     if (!document.getElementById('seekBar').matches(':active')) {
@@ -310,6 +357,8 @@ async function refresh() {
     }
     document.getElementById('volumeLabel').textContent =
       'Volume: ' + Number(st.playback_volume_db).toFixed(1) + ' dB';
+
+    document.getElementById('groupSplitFiles').checked = st.playback_group_split_files;
 
     const list = document.getElementById('fileList');
     list.innerHTML = '';
@@ -330,11 +379,12 @@ async function refresh() {
       list.appendChild(div);
     });
 
-    st.playback_files.forEach(f => {
+    st.playback_files.forEach((f, i) => {
+      const id = (st.playback_file_ids && st.playback_file_ids[i]) || f;
       const div = document.createElement('div');
       div.textContent = f;
-      if (f === selectedFile) div.classList.add('sel');
-      div.onclick = () => { selectedFile = f; refresh(); };
+      if (id === selectedFile) div.classList.add('sel');
+      div.onclick = () => { selectedFile = id; refresh(); };
       list.appendChild(div);
     });
 
@@ -500,6 +550,24 @@ bool RemoteControl::start(int port) {
     RemoteCommand cmd{RemoteCommandType::PlaybackSetVolume};
     cmd.float_arg = *db;
     push_command(std::move(cmd));
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  _server->Post("/api/playback_grouping", [this](const httplib::Request& req, httplib::Response& res) {
+    auto enabled = json_get_number(req.body, "enabled");
+    RemoteCommand cmd{RemoteCommandType::PlaybackSetGrouping};
+    cmd.int_arg = (enabled && *enabled != 0) ? 1 : 0;
+    push_command(std::move(cmd));
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  _server->Post("/api/playback_prev", [this](const httplib::Request&, httplib::Response& res) {
+    push_command(RemoteCommand{RemoteCommandType::PlaybackPrev});
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  _server->Post("/api/playback_next", [this](const httplib::Request&, httplib::Response& res) {
+    push_command(RemoteCommand{RemoteCommandType::PlaybackNext});
     res.set_content("{\"ok\":true}", "application/json");
   });
 
