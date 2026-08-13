@@ -151,6 +151,7 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
   .filelist { max-height:160px; overflow-y:auto; }
   .filelist div { padding:8px; border-radius:6px; margin:2px 0; }
   .filelist div.sel { background:#2f4f2f; }
+  .filelist div.playing { background:#1f6f3f; border-left:3px solid #4f9; padding-left:5px; }
   .tabs { display:flex; margin-bottom:14px; }
   .tabs button { border-radius:0; }
   .tabs button.active { background:#2f6f2f; }
@@ -382,8 +383,14 @@ async function refresh() {
     st.playback_files.forEach((f, i) => {
       const id = (st.playback_file_ids && st.playback_file_ids[i]) || f;
       const div = document.createElement('div');
-      div.textContent = f;
-      if (id === selectedFile) div.classList.add('sel');
+      const isPlaying = f === st.playback_current_file &&
+                        (st.playback_state === 'playing' || st.playback_state === 'paused');
+      div.textContent = (isPlaying ? '▶ ' : '') + f;
+      if (isPlaying) {
+        div.classList.add('playing');
+      } else if (id === selectedFile) {
+        div.classList.add('sel');
+      }
       div.onclick = () => { selectedFile = id; refresh(); };
       list.appendChild(div);
     });
