@@ -24,7 +24,7 @@ Includes a GUI with record/pause/stop controls and per-channel VU meters and a r
 - Play an entire folder sequentially with auto-advance to the next track
 - Route playback output to a specific channel pair on the interface (e.g. channels 5-6), independent of the file's own channel count
 - Playback volume control (dB), applied live without interrupting playback, default -5dB to tame "hot" MP3 masters
-- You can control all the software with your any browser simpli connecting at the address write on the software
+- You can control all the software with your any browser simply connecting at the address write on the software
 
 ## Building
 
