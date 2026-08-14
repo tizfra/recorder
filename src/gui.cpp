@@ -481,7 +481,14 @@ int run_gui(const Config& config) {
 
   // Track current USB disk path
   std::string current_usb_disk = find_usb_disk();
-  std::string output_basename = std::filesystem::path(active_config.output_file_base).filename().string();
+  // Stem senza estensione: l'estensione vera e propria viene aggiunta
+  // sotto in base al formato selezionato (record_format_flac), cosi' il
+  // toggle FLAC/WAV in GUI puo' ricalcolare output_basename senza dover
+  // toccare gli 8 punti del file che gia' la usano cosi' com'e'.
+  std::string output_stem = std::filesystem::path(active_config.output_file_base).stem().string();
+  if (output_stem.empty()) output_stem = "recording";
+  bool record_format_flac = true;  // default FLAC, come richiesto
+  std::string output_basename = output_stem + (record_format_flac ? ".flac" : ".wav");
   // Inizializza subito il path di output in base allo stato USB rilevato
   // ORA, non solo quando lo stato cambia in seguito (hot-plug) o quando
   // si preme Record: se la USB era gia' inserita all'avvio, senza questa
@@ -1162,6 +1169,30 @@ int run_gui(const Config& config) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", error_msg.c_str());
       }
 
+      // --- Recording format (FLAC/WAV): solo quando non si sta
+      // registrando, cambiarlo a meta' registrazione non avrebbe senso
+      // (il file writer e' gia' aperto sul formato scelto all'avvio). ---
+      if (!is_recording) {
+        ImGui::Text("Format:");
+        ImGui::SameLine();
+        bool format_changed = false;
+        if (ImGui::RadioButton("FLAC", record_format_flac)) {
+          record_format_flac = true;
+          format_changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("WAV", !record_format_flac)) {
+          record_format_flac = false;
+          format_changed = true;
+        }
+        if (format_changed) {
+          output_basename = output_stem + (record_format_flac ? ".flac" : ".wav");
+          std::string base = current_usb_disk.empty() ? output_basename
+                                                        : current_usb_disk + "/" + output_basename;
+          active_config.output_file = unique_filename(base);
+        }
+      }
+
       // --- Recording channel selection (only editable while idle: changing
       // which channels are captured mid-recording would require reopening
       // both the stream and the file writer) ---
@@ -1598,7 +1629,7 @@ int run_gui(const Config& config) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", rel_str.c_str());
       }
 
-      constexpr float kFileListHeight = 130.0f;
+      constexpr float kFileListHeight = 100.0f;
       // Narrower child window: leaves room on the right for the two
       // up/down scroll buttons, handy on a touchscreen with no mouse wheel.
       ImGui::BeginChild("FileList", ImVec2(-44, kFileListHeight), true);
@@ -1687,19 +1718,21 @@ int run_gui(const Config& config) {
                           "as if they were one recording.");
       }
 
-      // Il volume, a differenza del canale di uscita, si puo' cambiare
-      // liberamente anche durante la riproduzione: il guadagno si applica
-      // in tempo reale nel callback audio, senza bisogno di fermare o
-      // riaprire lo stream.
-      ImGui::SetNextItemWidth(-1);
-      ImGui::SliderFloat("Volume (dB)", &playback_volume_db, -24.0f, 6.0f, "%.1f dB");
-
       // Se attivo, premere Play avvia la riproduzione sequenziale di
       // tutti i file della cartella a partire da quello selezionato,
       // avanzando automaticamente quando ciascuno finisce da solo.
       if (is_playing_state) ImGui::BeginDisabled();
       ImGui::Checkbox("Play entire folder", &playlist_mode);
       if (is_playing_state) ImGui::EndDisabled();
+
+      // Il volume, a differenza del canale di uscita, si puo' cambiare
+      // liberamente anche durante la riproduzione: il guadagno si applica
+      // in tempo reale nel callback audio, senza bisogno di fermare o
+      // riaprire lo stream. Sulla stessa riga della checkbox sopra per
+      // risparmiare spazio verticale (lasciato ai VU meter piu' sotto).
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(-1);
+      ImGui::SliderFloat("Volume (dB)", &playback_volume_db, -24.0f, 6.0f, "%.1f dB");
 
       // --- Buttons, riga 1: Prev, Play/Pause/Resume, Next, Stop ---
       bool has_selection = selected_file_idx >= 0 && selected_file_idx < static_cast<int>(playback_entries.size());
@@ -1766,11 +1799,11 @@ int run_gui(const Config& config) {
       ImGui::PopStyleColor(3);
       if (!is_playing_state) ImGui::EndDisabled();
 
-      // --- Buttons, riga 2: Desktop, Quit ---
+      // --- Buttons, riga 2: Desktop, Quit, Shutdown ---
       ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
-      if (row_button("Desktop", 0, 2, btn_h)) {
+      if (row_button("Desktop", 0, 3, btn_h)) {
         glfwIconifyWindow(window);
       }
       ImGui::PopStyleColor(3);
@@ -1778,8 +1811,16 @@ int run_gui(const Config& config) {
       ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.35f, 0.35f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.25f, 0.25f, 0.25f, 1.0f));
-      if (row_button("Quit", 1, 2, btn_h)) {
+      if (row_button("Quit", 1, 3, btn_h)) {
         ImGui::OpenPopup("Confirm Quit");
+      }
+      ImGui::PopStyleColor(3);
+
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.15f, 0.5f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.2f, 0.6f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.1f, 0.4f, 1.0f));
+      if (row_button("Shutdown", 2, 3, btn_h)) {
+        ImGui::OpenPopup("Confirm Shutdown");
       }
       ImGui::PopStyleColor(3);
 
@@ -1799,6 +1840,27 @@ int run_gui(const Config& config) {
         ImGui::SameLine();
         if (ImGui::Button("Quit", ImVec2(120, 0))) {
           if (player) player->stop();
+          glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        ImGui::EndPopup();
+      }
+
+      // Confirmation popup (Shutdown) — stesso ID "Confirm Shutdown"
+      // usato in Record mode, stesso motivo del duplicato sopra per Quit.
+      if (ImGui::BeginPopupModal("Confirm Shutdown", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Shut down the Raspberry Pi?");
+        if (player && player->state() == AudioPlayer::State::Playing) {
+          ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Playback will be stopped.");
+        }
+        ImGui::Spacing();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Shut Down", ImVec2(120, 0))) {
+          if (player) player->stop();
+          std::system("sync");
+          std::system("sudo systemctl poweroff");
           glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
         ImGui::EndPopup();
