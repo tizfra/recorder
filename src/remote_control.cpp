@@ -45,6 +45,14 @@ std::string status_to_json(const RemoteStatus& s) {
   j << "\"has_input_device\":" << (s.has_input_device ? "true" : "false") << ",";
   j << "\"input_device_name\":\"" << json_escape(s.input_device_name) << "\",";
 
+  j << "\"available_usb_disks\":[";
+  for (size_t i = 0; i < s.available_usb_disks.size(); ++i) {
+    if (i > 0) j << ",";
+    j << "\"" << json_escape(s.available_usb_disks[i]) << "\"";
+  }
+  j << "],";
+  j << "\"current_usb_disk\":\"" << json_escape(s.current_usb_disk) << "\",";
+
   j << "\"playback_files\":[";
   for (size_t i = 0; i < s.playback_files.size(); ++i) {
     if (i > 0) j << ",";
@@ -168,6 +176,9 @@ constexpr const char* kIndexHtml = R"HTML(<!doctype html>
 
 <div id="recordCard" class="card">
   <div class="status-line" id="recStatus">—</div>
+  <div class="row" id="diskSelectorRow" style="display:none">
+    <select id="diskSelect" onchange="setDisk(this.value)"></select>
+  </div>
   <div class="row">
     <button class="record" onclick="cmd('record_start')">● Record</button>
     <button onclick="cmd('record_pause')">Pause</button>
@@ -310,6 +321,10 @@ function setGrouping(enabled) {
   cmd('playback_grouping', {enabled: enabled ? 1 : 0});
 }
 
+function setDisk(diskName) {
+  cmd('set_usb_disk', {disk: diskName});
+}
+
 function fmtTime(s) {
   s = Math.floor(s);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -328,6 +343,30 @@ async function refresh() {
 
     document.getElementById('recStatus').textContent =
       `${st.record_state}  ${fmtTime(st.record_elapsed)}  ${st.record_file || ''}`;
+
+    const diskRow = document.getElementById('diskSelectorRow');
+    const diskSelect = document.getElementById('diskSelect');
+    const disks = st.available_usb_disks || [];
+    if (disks.length > 1) {
+      diskRow.style.display = '';
+      const wantOptionsKey = disks.join('|');
+      if (diskSelect.dataset.optionsKey !== wantOptionsKey) {
+        diskSelect.innerHTML = '';
+        disks.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d;
+          opt.textContent = d;
+          diskSelect.appendChild(opt);
+        });
+        diskSelect.dataset.optionsKey = wantOptionsKey;
+      }
+      if (document.activeElement !== diskSelect) {
+        diskSelect.value = st.current_usb_disk || '';
+      }
+    } else {
+      diskRow.style.display = 'none';
+    }
+
     document.getElementById('playStatus').textContent =
       `${st.playback_state}  ${fmtTime(st.playback_position)} / ${fmtTime(st.playback_duration)}` +
       (st.playback_current_file ? `  ${st.playback_current_file}` : '') +
@@ -575,6 +614,14 @@ bool RemoteControl::start(int port) {
 
   _server->Post("/api/playback_next", [this](const httplib::Request&, httplib::Response& res) {
     push_command(RemoteCommand{RemoteCommandType::PlaybackNext});
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  _server->Post("/api/set_usb_disk", [this](const httplib::Request& req, httplib::Response& res) {
+    auto disk = json_get_string(req.body, "disk");
+    RemoteCommand cmd{RemoteCommandType::SetUsbDisk};
+    cmd.file_arg = disk ? *disk : "";  // stringa vuota = deseleziona
+    push_command(std::move(cmd));
     res.set_content("{\"ok\":true}", "application/json");
   });
 

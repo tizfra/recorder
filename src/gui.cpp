@@ -481,6 +481,10 @@ int run_gui(const Config& config) {
 
   // Track current USB disk path
   std::string current_usb_disk = find_usb_disk();
+  // Tutti i dischi USB scrivibili attualmente rilevati (non solo quello
+  // in uso): serve per il selettore quando ce n'e' piu' di uno. Popolata
+  // dallo stesso ciclo di scansione che aggiorna current_usb_disk.
+  std::vector<std::string> available_usb_disks;
   // Stem senza estensione: l'estensione vera e propria viene aggiunta
   // sotto in base al formato selezionato (record_format_flac), cosi' il
   // toggle FLAC/WAV in GUI puo' ricalcolare output_basename senza dover
@@ -619,6 +623,49 @@ int run_gui(const Config& config) {
     std::fprintf(stderr, "Controllo remoto disponibile su http://%s\n", remote_addr_display.c_str());
   }
 
+  // Imposta il disco USB attivo, gestendo tutte le conseguenze del
+  // cambio (path di playback, file di output, stop di un'eventuale
+  // registrazione/riproduzione in corso se il disco sparisce). Centrale
+  // e riusabile da: rilevamento automatico (un disco solo), selezione
+  // manuale in GUI (piu' di un disco), comando remoto equivalente.
+  auto set_active_usb_disk = [&](const std::string& new_disk) {
+    std::string old_disk = current_usb_disk;
+    current_usb_disk = new_disk;
+    playback_dir = current_usb_disk.empty() ? "." : current_usb_disk;
+    selected_file_idx = -1;
+    playlist_active = false;
+
+    if (!new_disk.empty()) {
+      if (!rec) {
+        active_config.output_file = unique_filename(new_disk + "/" + output_basename);
+      }
+      std::fprintf(stderr, "USB disk selected: %s\n", new_disk.c_str());
+    } else {
+      if (!old_disk.empty()) {
+        std::fprintf(stderr, "USB disk removed/deselected: %s\n", old_disk.c_str());
+      }
+      if (rec && (rec->state() == Recorder::State::Recording ||
+                  rec->state() == Recorder::State::Paused)) {
+        std::fprintf(stderr, "Disk removed during recording — stopping.\n");
+        rec->stop();
+        last_total_frames = rec->total_frames();
+        last_overruns = rec->overruns();
+        last_files_written = rec->files_written();
+        last_elapsed = rec->elapsed_seconds();
+        rec.reset();
+        monitor.start(active_config.device_index, active_config.channels,
+                      active_config.sample_rate);
+        error_msg = "USB disk removed. Recording stopped.";
+      }
+      if (player) {
+        playlist_active = false;
+        player->stop();
+        player.reset();
+      }
+      active_config.output_file = unique_filename(output_basename);
+    }
+  };
+
   // Salta alla voce di playback_entries all'indice dato: ferma il player
   // corrente e, se stava effettivamente suonando (non solo selezionato/
   // fermo), avvia subito la riproduzione della nuova voce — cosi'
@@ -745,41 +792,29 @@ int run_gui(const Config& config) {
       double since_disk_scan = std::chrono::duration<double>(now - last_disk_scan).count();
       if (since_disk_scan >= 2.0) {
         last_disk_scan = now;
-        std::string usb_disk = find_usb_disk();
-        if (usb_disk != current_usb_disk) {
-          std::string old_disk = current_usb_disk;
-          current_usb_disk = usb_disk;
-          playback_dir = current_usb_disk.empty() ? "." : current_usb_disk;
-          selected_file_idx = -1;
-          playlist_active = false;
+        available_usb_disks = scan_usb_disks();
 
-          if (!usb_disk.empty()) {
-            if (!rec) {
-              active_config.output_file = unique_filename(usb_disk + "/" + output_basename);
-            }
-            std::fprintf(stderr, "USB disk detected: %s\n", usb_disk.c_str());
-          } else {
-            std::fprintf(stderr, "USB disk removed: %s\n", old_disk.c_str());
-            if (rec && (rec->state() == Recorder::State::Recording ||
-                        rec->state() == Recorder::State::Paused)) {
-              std::fprintf(stderr, "Disk removed during recording — stopping.\n");
-              rec->stop();
-              last_total_frames = rec->total_frames();
-              last_overruns = rec->overruns();
-              last_files_written = rec->files_written();
-              last_elapsed = rec->elapsed_seconds();
-              rec.reset();
-              monitor.start(active_config.device_index, active_config.channels,
-                            active_config.sample_rate);
-              error_msg = "USB disk removed. Recording stopped.";
-            }
-            if (player) {
-              playlist_active = false;
-              player->stop();
-              player.reset();
-            }
-            active_config.output_file = unique_filename(output_basename);
-          }
+        // Decide quale disco dovrebbe essere quello attivo:
+        // - se quello gia' in uso e' ancora presente, non lo tocchiamo
+        //   (non vogliamo interrompere una sessione attiva solo perche'
+        //   e' comparso un secondo disco);
+        // - altrimenti, se c'e' ESATTAMENTE un disco disponibile, lo
+        //   selezioniamo da soli — stesso comportamento di sempre quando
+        //   ce n'e' uno solo, zero azioni richieste all'utente;
+        // - se sono zero o piu' di uno (e nessuno gia' attivo), lasciamo
+        //   la selezione vuota: con piu' di un disco la scelta spetta
+        //   all'utente tramite il selettore in GUI/remoto.
+        bool current_still_present =
+            !current_usb_disk.empty() &&
+            std::find(available_usb_disks.begin(), available_usb_disks.end(), current_usb_disk) !=
+                available_usb_disks.end();
+        std::string target_disk = current_usb_disk;
+        if (!current_still_present) {
+          target_disk = (available_usb_disks.size() == 1) ? available_usb_disks[0] : std::string();
+        }
+
+        if (target_disk != current_usb_disk) {
+          set_active_usb_disk(target_disk);
         }
         update_disk_space();
       }
@@ -1005,6 +1040,31 @@ int run_gui(const Config& config) {
         case RemoteCommandType::PlaybackNext:
           play_index(selected_file_idx + 1);
           break;
+        case RemoteCommandType::SetUsbDisk: {
+          bool recording_now =
+              rec && (rstate == Recorder::State::Recording || rstate == Recorder::State::Paused);
+          if (recording_now) {
+            error_msg = "Can't change USB disk while recording.";
+            break;
+          }
+          if (cmd->file_arg.empty()) {
+            set_active_usb_disk("");
+          } else {
+            std::string match;
+            for (auto& disk : available_usb_disks) {
+              if (std::filesystem::path(disk).filename().string() == cmd->file_arg) {
+                match = disk;
+                break;
+              }
+            }
+            if (!match.empty()) {
+              set_active_usb_disk(match);
+            } else {
+              error_msg = "USB disk not found.";
+            }
+          }
+          break;
+        }
         case RemoteCommandType::Quit:
           if (rec && (rstate == Recorder::State::Recording || rstate == Recorder::State::Paused)) {
             rec->stop();
@@ -1162,6 +1222,27 @@ int run_gui(const Config& config) {
         } else {
           ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No input device found");
         }
+      }
+
+      // --- USB disk selector: visibile solo con piu' di un disco
+      // collegato (con uno solo il comportamento resta automatico come
+      // sempre). Non editabile durante una registrazione: cambiare
+      // disco a meta' avrebbe bisogno di chiudere/riaprire il writer.
+      if (available_usb_disks.size() > 1) {
+        if (is_recording) ImGui::BeginDisabled();
+        std::string current_label = current_usb_disk.empty()
+            ? "(none selected)" : std::filesystem::path(current_usb_disk).filename().string();
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::BeginCombo("USB Disk", current_label.c_str())) {
+          for (auto& disk : available_usb_disks) {
+            std::string label = std::filesystem::path(disk).filename().string();
+            if (ImGui::Selectable(label.c_str(), disk == current_usb_disk)) {
+              set_active_usb_disk(disk);
+            }
+          }
+          ImGui::EndCombo();
+        }
+        if (is_recording) ImGui::EndDisabled();
       }
 
       // --- Error ---
@@ -1922,6 +2003,11 @@ int run_gui(const Config& config) {
       st.record_overruns = rec ? rec->overruns() : 0;
       st.has_input_device = !selected_device_name.empty();
       st.input_device_name = selected_device_name;
+      for (auto& disk : available_usb_disks) {
+        st.available_usb_disks.push_back(std::filesystem::path(disk).filename().string());
+      }
+      st.current_usb_disk = current_usb_disk.empty()
+          ? "" : std::filesystem::path(current_usb_disk).filename().string();
 
       for (auto& entry : playback_entries) {
         st.playback_files.push_back(entry.display_name);

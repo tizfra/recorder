@@ -143,26 +143,33 @@ void print_input_devices() {
   Pa_Terminate();
 }
 
+#ifdef __APPLE__
+// Normalizza in NFC (macOS restituisce i nomi file in NFD, che puo'
+// causare confronti/visualizzazioni inconsistenti su Linux/altrove).
+// Fattorizzata qui perche' serve sia a find_usb_disk() che a
+// scan_usb_disks(), che condividono la stessa logica di scansione.
+static std::string to_nfc(const std::string& s) {
+  CFStringRef ref = CFStringCreateWithBytes(kCFAllocatorDefault,
+      reinterpret_cast<const UInt8*>(s.data()), s.size(),
+      kCFStringEncodingUTF8, false);
+  if (!ref) return s;
+  CFMutableStringRef mut = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, ref);
+  CFRelease(ref);
+  if (!mut) return s;
+  CFStringNormalize(mut, kCFStringNormalizationFormC);
+  CFIndex len = CFStringGetMaximumSizeForEncoding(
+      CFStringGetLength(mut), kCFStringEncodingUTF8) + 1;
+  std::string result(len, '\0');
+  CFStringGetCString(mut, &result[0], len, kCFStringEncodingUTF8);
+  result.resize(std::strlen(result.c_str()));
+  CFRelease(mut);
+  return result;
+}
+#endif
+
 std::string find_usb_disk() {
   namespace fs = std::filesystem;
 #ifdef __APPLE__
-  auto to_nfc = [](const std::string& s) -> std::string {
-    CFStringRef ref = CFStringCreateWithBytes(kCFAllocatorDefault,
-        reinterpret_cast<const UInt8*>(s.data()), s.size(),
-        kCFStringEncodingUTF8, false);
-    if (!ref) return s;
-    CFMutableStringRef mut = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, ref);
-    CFRelease(ref);
-    if (!mut) return s;
-    CFStringNormalize(mut, kCFStringNormalizationFormC);
-    CFIndex len = CFStringGetMaximumSizeForEncoding(
-        CFStringGetLength(mut), kCFStringEncodingUTF8) + 1;
-    std::string result(len, '\0');
-    CFStringGetCString(mut, &result[0], len, kCFStringEncodingUTF8);
-    result.resize(std::strlen(result.c_str()));
-    CFRelease(mut);
-    return result;
-  };
   const fs::path volumes("/Volumes");
   if (!fs::is_directory(volumes)) return {};
   for (auto& entry : fs::directory_iterator(volumes)) {
@@ -194,6 +201,44 @@ std::string find_usb_disk() {
   }
 #endif
   return {};
+}
+
+std::vector<std::string> scan_usb_disks() {
+  namespace fs = std::filesystem;
+  std::vector<std::string> disks;
+#ifdef __APPLE__
+  const fs::path volumes("/Volumes");
+  if (fs::is_directory(volumes)) {
+    for (auto& entry : fs::directory_iterator(volumes)) {
+      if (!entry.is_directory()) continue;
+      auto name = entry.path().filename().string();
+      if (name == "Macintosh HD") continue;
+      if (access(entry.path().c_str(), W_OK) == 0) {
+        disks.push_back(to_nfc(entry.path().string()));
+      }
+    }
+  }
+#else
+  if (const char* user = std::getenv("USER")) {
+    fs::path media = fs::path("/media") / user;
+    if (fs::is_directory(media)) {
+      for (auto& entry : fs::directory_iterator(media)) {
+        if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
+          disks.push_back(entry.path().string());
+        }
+      }
+    }
+  }
+  const fs::path mnt("/mnt");
+  if (fs::is_directory(mnt)) {
+    for (auto& entry : fs::directory_iterator(mnt)) {
+      if (entry.is_directory() && access(entry.path().c_str(), W_OK) == 0) {
+        disks.push_back(entry.path().string());
+      }
+    }
+  }
+#endif
+  return disks;
 }
 
 std::string unique_filename(const std::string& path) {

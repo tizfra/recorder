@@ -31,6 +31,7 @@ enum class RemoteCommandType {
   PlaybackSetGrouping,  // usa int_arg = 0/1 (disattiva/attiva 'Group split files')
   PlaybackPrev,       // salta alla voce precedente nel browser corrente
   PlaybackNext,       // salta alla voce successiva nel browser corrente
+  SetUsbDisk,         // usa file_arg = nome del disco (basename) da attivare
   SwitchToRecordMode,
   SwitchToPlaybackMode,
   Quit,
@@ -56,6 +57,9 @@ struct RemoteStatus {
   uint64_t record_overruns = 0;
   bool has_input_device = false;
   std::string input_device_name;
+
+  std::vector<std::string> available_usb_disks;  // nomi (basename) dei dischi rilevati
+  std::string current_usb_disk;                  // nome (basename) del disco attivo, vuoto se nessuno
 
   std::vector<std::string> playback_files;   // nomi da mostrare (per i gruppi: "base [N files]")
   std::vector<std::string> playback_file_ids;  // stesso ordine di playback_files: nome del primo
