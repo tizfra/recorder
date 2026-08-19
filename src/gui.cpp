@@ -522,6 +522,35 @@ int run_gui(const Config& config) {
       std::snprintf(buf, sizeof(buf), "%.1f GB free", bytes / 1e9);
     }
     disk_space_str = buf;
+
+    // Stima il tempo di registrazione residuo in base ai canali
+    // EFFETTIVAMENTE selezionati (non tutti quelli del device) e al
+    // formato corrente. Per FLAC e' solo una stima: la compressione
+    // lossless dipende dal contenuto audio — 60% della dimensione WAV
+    // e' una media ragionevole per materiale reale, ma silenzio o
+    // rumore molto denso possono discostarsene parecchio.
+    auto sel = compute_record_channels();
+    int rec_channels = sel.empty() ? active_config.channels : static_cast<int>(sel.size());
+    if (rec_channels > 0 && active_config.sample_rate > 0) {
+      double bytes_per_sec_wav = static_cast<double>(active_config.sample_rate) * rec_channels *
+                                 (active_config.bit_depth / 8.0);
+      double bytes_per_sec = record_format_flac ? bytes_per_sec_wav * 0.6 : bytes_per_sec_wav;
+      if (bytes_per_sec > 0) {
+        double seconds = bytes / bytes_per_sec;
+        int total_min = static_cast<int>(seconds / 60.0);
+        int h = total_min / 60;
+        int m = total_min % 60;
+        char time_buf[32];
+        if (h > 0) {
+          std::snprintf(time_buf, sizeof(time_buf), " (~%dh %dm %s)", h, m,
+                        record_format_flac ? "FLAC" : "WAV");
+        } else {
+          std::snprintf(time_buf, sizeof(time_buf), " (~%dm %s)", m,
+                        record_format_flac ? "FLAC" : "WAV");
+        }
+        disk_space_str += time_buf;
+      }
+    }
   };
   update_disk_space();
 
@@ -1271,6 +1300,7 @@ int run_gui(const Config& config) {
           std::string base = current_usb_disk.empty() ? output_basename
                                                         : current_usb_disk + "/" + output_basename;
           active_config.output_file = unique_filename(base);
+          update_disk_space();
         }
       }
 
@@ -1284,10 +1314,12 @@ int run_gui(const Config& config) {
           }
           if (ImGui::Button("All", ImVec2(60, 0))) {
             std::fill(record_channel_selected.begin(), record_channel_selected.end(), true);
+            update_disk_space();
           }
           ImGui::SameLine();
           if (ImGui::Button("None", ImVec2(60, 0))) {
             std::fill(record_channel_selected.begin(), record_channel_selected.end(), false);
+            update_disk_space();
           }
 
           constexpr int kCols = 8;
@@ -1302,6 +1334,7 @@ int run_gui(const Config& config) {
               bool sel = record_channel_selected[c];
               if (ImGui::Checkbox(label, &sel)) {
                 record_channel_selected[c] = sel;
+                update_disk_space();
               }
             }
             ImGui::EndTable();
